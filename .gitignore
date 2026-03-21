@@ -1,4 +1,5 @@
 MLP/data_cache/
+logs/
 __pycache__/
 *.pyc
 .venv/

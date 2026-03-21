@@ -5,6 +5,7 @@ import urllib.request
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+from torchvision import datasets, transforms
 from sklearn.datasets import fetch_covtype
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -92,3 +93,21 @@ def get_year_prediction_loaders(batch_size=1024, seed=42):
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     return train_loader, test_loader, 90, 1
+
+
+def get_mnist_loaders(batch_size=1024, seed=42):
+    """MNIST: 60K train / 10K test, 784 features (flattened 28x28), 10 classes."""
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,)),
+        transforms.Lambda(lambda x: x.view(-1)),
+    ])
+
+    train_ds = datasets.MNIST(DATA_CACHE, train=True, download=True, transform=transform)
+    test_ds = datasets.MNIST(DATA_CACHE, train=False, download=True, transform=transform)
+
+    g = torch.Generator().manual_seed(seed)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, generator=g)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+
+    return train_loader, test_loader, 784, 10

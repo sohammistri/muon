@@ -12,13 +12,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from muon import Muon
 from MLP.model import MLP
-from MLP.data import get_covertype_loaders, get_year_prediction_loaders
+from MLP.data import get_covertype_loaders, get_year_prediction_loaders, get_mnist_loaders
+from common.logger import setup_logger
+from common.metrics import compute_weight_diagnostics, compute_gradient_diagnostics
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="MLP Optimizer Benchmark")
     parser.add_argument("--task", choices=["classification", "regression"],
                         default="classification")
+    parser.add_argument("--dataset", choices=["covertype", "year_prediction", "mnist"],
+                        default=None,
+                        help="Dataset to use. Overrides --task. Default: inferred from --task")
     parser.add_argument("--optim", choices=["sgd", "adamw", "muon"],
                         default="adamw")
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -32,6 +37,8 @@ def parse_args():
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--log_diagnostics", action="store_true",
+                        help="Log detailed optimizer diagnostics to W&B at each eval step")
     return parser.parse_args()
 
 
@@ -45,6 +52,20 @@ def get_device(requested=None):
     return torch.device("cpu")
 
 
+class OptimizerGroup:
+    """Wraps multiple optimizers with a unified interface."""
+    def __init__(self, *optimizers):
+        self.optimizers = optimizers
+
+    def zero_grad(self):
+        for opt in self.optimizers:
+            opt.zero_grad()
+
+    def step(self):
+        for opt in self.optimizers:
+            opt.step()
+
+
 def create_optimizer(model, args):
     if args.optim == "sgd":
         return torch.optim.SGD(model.parameters(), lr=args.lr,
@@ -53,9 +74,24 @@ def create_optimizer(model, args):
         return torch.optim.AdamW(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
     elif args.optim == "muon":
-        return Muon(model.parameters(), lr=args.lr,
-                    momentum=0.95, steps=5,
-                    weight_decay=args.weight_decay, nesterov=True)
+        # Only backbone Linear weights get Newton-Schulz; everything else gets AdamW
+        modules = dict(model.named_modules())
+        muon_params = []
+        for name, p in model.named_parameters():
+            if 'backbone' in name and name.endswith('.weight') and p.ndim == 2:
+                mod_name = name.rsplit('.', 1)[0]
+                if isinstance(modules[mod_name], nn.Linear):
+                    muon_params.append(p)
+
+        muon_ids = {id(p) for p in muon_params}
+        adam_params = [p for p in model.parameters() if id(p) not in muon_ids]
+
+        return OptimizerGroup(
+            Muon(muon_params, lr=args.lr, momentum=0.95, steps=5,
+                 weight_decay=args.weight_decay, nesterov=True),
+            torch.optim.AdamW(adam_params, lr=args.lr,
+                              weight_decay=args.weight_decay),
+        )
 
 
 @torch.no_grad()
@@ -100,12 +136,26 @@ def main():
     torch.manual_seed(args.seed)
 
     device = get_device(args.device)
-    print(f"Using device: {device}")
+
+    log = setup_logger("mlp", args.task, args.optim)
+    log.info(f"Using device: {device}")
+
+    # Resolve dataset and task
+    dataset = args.dataset
+    if dataset is None:
+        dataset = "covertype" if args.task == "classification" else "year_prediction"
+    if dataset in ("covertype", "mnist"):
+        args.task = "classification"
+    else:
+        args.task = "regression"
 
     # Load data
-    if args.task == "classification":
+    if dataset == "covertype":
         train_loader, test_loader, input_dim, output_dim = \
             get_covertype_loaders(args.batch_size, args.seed)
+    elif dataset == "mnist":
+        train_loader, test_loader, input_dim, output_dim = \
+            get_mnist_loaders(args.batch_size, args.seed)
     else:
         train_loader, test_loader, input_dim, output_dim = \
             get_year_prediction_loaders(args.batch_size, args.seed)
@@ -113,7 +163,7 @@ def main():
     # Create model
     model = MLP(input_dim, output_dim, args.hidden_dims, args.dropout).to(device)
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {param_count:,}")
+    log.info(f"Model parameters: {param_count:,}")
 
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss() if args.task == "classification" else nn.MSELoss()
@@ -122,12 +172,25 @@ def main():
     # W&B
     wandb.init(
         project="muon",
-        name=f"mlp-{args.task}-{args.optim}",
+        name=f"mlp-{dataset}-{args.task}-{args.optim}",
         config=vars(args),
     )
 
-    # Training loop
+    # Step-0 evaluation
     global_step = 0
+    metrics = evaluate(model, test_loader, criterion, args.task, device)
+    if args.log_diagnostics:
+        weight_diag = compute_weight_diagnostics(model)
+        metrics.update(weight_diag)
+        for k, v in list(metrics.items()):
+            if k.endswith("/sv_histogram"):
+                metrics[k] = wandb.Histogram(v)
+    wandb.log(metrics, step=global_step)
+    summary = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items()
+                        if not k.startswith("diagnostics/"))
+    log.info(f"[Step {global_step}] {summary}")
+
+    # Training loop
     model.train()
 
     for epoch in range(args.epochs):
@@ -146,16 +209,36 @@ def main():
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
             if global_step % args.eval_every == 0:
+                if args.log_diagnostics:
+                    grad_diag = compute_gradient_diagnostics(model)
+                    weight_diag = compute_weight_diagnostics(model)
                 metrics = evaluate(model, test_loader, criterion, args.task, device)
+                if args.log_diagnostics:
+                    metrics.update(grad_diag)
+                    metrics.update(weight_diag)
+                    for k, v in list(metrics.items()):
+                        if k.endswith("/sv_histogram"):
+                            metrics[k] = wandb.Histogram(v)
                 wandb.log(metrics, step=global_step)
-                summary = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-                print(f"\n[Step {global_step}] {summary}")
+                summary = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items()
+                                    if not k.startswith("diagnostics/"))
+                log.info(f"[Step {global_step}] {summary}")
 
     # Final evaluation
+    if args.log_diagnostics:
+        grad_diag = compute_gradient_diagnostics(model)
+        weight_diag = compute_weight_diagnostics(model)
     metrics = evaluate(model, test_loader, criterion, args.task, device)
+    if args.log_diagnostics:
+        metrics.update(grad_diag)
+        metrics.update(weight_diag)
+        for k, v in list(metrics.items()):
+            if k.endswith("/sv_histogram"):
+                metrics[k] = wandb.Histogram(v)
     wandb.log(metrics, step=global_step)
-    summary = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-    print(f"\nFinal eval: {summary}")
+    summary = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items()
+                        if not k.startswith("diagnostics/"))
+    log.info(f"Final eval: {summary}")
 
     wandb.finish()
 

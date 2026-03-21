@@ -46,10 +46,12 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
 
 class Muon(optim.Optimizer):
     def __init__(self, params, lr=0.01, momentum=0.95, steps=5,
-                 weight_decay=0, nesterov=True, maximize=False):
+                 weight_decay=0, nesterov=True, maximize=False,
+                 adam_betas=(0.9, 0.999), adam_eps=1e-8):
 
         defaults = dict(lr=lr, momentum=momentum, steps=steps,
-                        weight_decay=weight_decay, nesterov=nesterov)
+                        weight_decay=weight_decay, nesterov=nesterov,
+                        adam_betas=adam_betas, adam_eps=adam_eps)
         self.maximize = maximize
         super().__init__(params, defaults)
 
@@ -79,9 +81,6 @@ class Muon(optim.Optimizer):
 
                 # Get state for this parameter
                 state = self.state[p]
-                # Initialize momentum buffer if it doesn't exist
-                if 'momentum_buffer' not in state:
-                    state['momentum_buffer'] = torch.zeros_like(grad)
 
                 # Apply weight decay directly to parameters (AdamW style)
                 if weight_decay != 0:
@@ -89,24 +88,37 @@ class Muon(optim.Optimizer):
 
                 # Apply zeropower_via_newtonschulz5 if parameter is a matrix
                 if p.ndim >= 2:
+                    if 'momentum_buffer' not in state:
+                        state['momentum_buffer'] = torch.zeros_like(grad)
+
                     org_shape = p.shape
                     orthogonal_buff = muon_update(grad, state["momentum_buffer"],
                                                 beta=momentum, ns_steps=steps, nesterov=nesterov)
                     if p.ndim == 4:
                         orthogonal_buff = orthogonal_buff.view(org_shape)
 
-                    # Apply update to parameters
                     p.add_(orthogonal_buff, alpha=-lr)
                 else:
-                    # For non-matrix parameters, use standard momentum update
-                    buf = state['momentum_buffer']
-                    buf.mul_(momentum).add_(grad)
+                    # For non-matrix parameters (biases, BatchNorm), use Adam
+                    beta1, beta2 = group['adam_betas']
+                    eps = group['adam_eps']
 
-                    # furhter modify buf if nesterov
-                    if nesterov:
-                        buf = grad + momentum * buf
+                    if 'exp_avg' not in state:
+                        state['exp_avg'] = torch.zeros_like(grad)
+                        state['exp_avg_sq'] = torch.zeros_like(grad)
+                        state['step'] = 0
 
-                    # Apply update to parameters
-                    p.add_(buf, alpha=-lr)
+                    state['step'] += 1
+                    exp_avg = state['exp_avg']
+                    exp_avg_sq = state['exp_avg_sq']
+
+                    exp_avg.lerp_(grad, 1 - beta1)
+                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                    bias_corr1 = 1 - beta1 ** state['step']
+                    bias_corr2 = 1 - beta2 ** state['step']
+
+                    update = (exp_avg / bias_corr1) / ((exp_avg_sq / bias_corr2).sqrt() + eps)
+                    p.add_(update, alpha=-lr)
 
         return loss
