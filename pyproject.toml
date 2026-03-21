@@ -1,0 +1,22 @@
+[project]
+name = "muon"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate>=1.13.0",
+    "datasets>=4.8.3",
+    "einops>=0.8.2",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+    "safetensors>=0.7.0",
+    "scikit-learn>=1.8.0",
+    "tensorboard>=2.20.0",
+    "torch>=2.10.0",
+    "torchaudio>=2.10.0",
+    "torchvision>=0.25.0",
+    "tqdm>=4.67.3",
+    "transformers>=5.3.0",
+    "wandb>=0.25.1",
+]
