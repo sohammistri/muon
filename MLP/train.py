@@ -164,6 +164,7 @@ def main():
 
     # Create model
     model = MLP(input_dim, output_dim, args.hidden_dims, args.dropout).to(device)
+    model = torch.compile(model)
     param_count = sum(p.numel() for p in model.parameters())
     log.info(f"Model parameters: {param_count:,}")
 
