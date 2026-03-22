@@ -49,3 +49,26 @@ uv run python CNN/train.py --optim muon-llm --dataset cifar10 --log_diagnostics
 - **`common/metrics.py`** — SVD-based weight diagnostics (condition number, effective rank, spectral norm, orthogonality error) and gradient diagnostics. These are the key metrics for understanding Muon's effect on weight matrices.
 
 - **`common/logger.py`** — Colored console + file logging. Logs saved to `logs/`.
+
+## Testing
+
+```bash
+# Run all tests
+uv run python -m pytest tests/ -v
+
+# Run MLP tests only (38 tests)
+uv run python -m pytest tests/test_mlp.py -v
+
+# Run CNN tests only (36 tests)
+uv run python -m pytest tests/test_cnn.py -v
+```
+
+- **`tests/test_mlp.py`** — 38 tests covering MLP model construction, forward pass (classification + regression squeeze), data loaders (covertype, mnist, year_prediction), optimizer creation and Muon param splitting (2D backbone Linear weights only), training convergence for all 4 optimizers on both classification and regression, evaluate metrics, and SVD-based diagnostics.
+
+- **`tests/test_cnn.py`** — 36 tests covering CNN model construction (including AdaptiveAvgPool2d variable spatial input), CIFAR-10 data loading, optimizer creation and Muon param splitting (Conv2d 4D + Linear 2D weights), 4D conv weight shape preservation after Muon steps, training convergence, evaluate metrics (classification-only, no regression keys), weight decay verification, and diagnostics (condition number, spectral norm, orthogonality error, effective rank).
+
+### Test patterns
+- Tests use small models (`channels=[8,16]`, `hidden_dims=[32,16]`) and tiny batches (B=4–8) for speed.
+- `_Args` helper class mocks the argparse namespace for `create_optimizer`.
+- Evaluate tests use `TensorDataset` fake loaders to avoid dataset downloads.
+- Data loader tests download datasets on first run (CIFAR-10, Covertype, MNIST, Year Prediction MSD).
