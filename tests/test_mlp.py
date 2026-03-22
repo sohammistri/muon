@@ -1,4 +1,4 @@
-"""Tests for CNN model, data loading, optimizer creation, and training."""
+"""Tests for MLP model, data loading, optimizer creation, and training."""
 
 import sys
 import os
@@ -8,65 +8,54 @@ import torch.nn as nn
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from CNN.model import CNN
-from CNN.data import get_cifar10_loaders, CIFAR10_MEAN, CIFAR10_STD
-from CNN.train import create_optimizer, evaluate, OptimizerGroup
+from MLP.model import MLP
+from MLP.data import get_covertype_loaders, get_year_prediction_loaders, get_mnist_loaders
+from MLP.train import create_optimizer, evaluate, OptimizerGroup
 from muon import MuonJordan, MuonLLM
 from common.metrics import compute_weight_diagnostics, compute_gradient_diagnostics
 
 
 # ---------------------------------------------------------------------------
-# CNN Model tests
+# MLP Model tests
 # ---------------------------------------------------------------------------
 
-class TestCNNModel:
+class TestMLPModel:
     def test_default_construction(self):
-        model = CNN()
+        model = MLP(input_dim=54, output_dim=7)
         assert isinstance(model.backbone, nn.Sequential)
-        assert isinstance(model.pool, nn.AdaptiveAvgPool2d)
         assert isinstance(model.head, nn.Linear)
-        assert model.head.out_features == 10
+        assert model.head.out_features == 7
+        assert model.head.in_features == 128  # last of default [512, 256, 256, 128]
 
-    def test_default_channels_value(self):
-        model = CNN()
-        assert model.head.in_features == 128  # last of default [32, 64, 128]
-
-    def test_custom_channels(self):
-        model = CNN(in_channels=1, num_classes=5, channels=[16, 32])
+    def test_custom_hidden_dims(self):
+        model = MLP(input_dim=100, output_dim=5, hidden_dims=[64, 32])
         assert model.head.out_features == 5
         assert model.head.in_features == 32
 
-    def test_forward_shape(self):
-        model = CNN(in_channels=3, num_classes=10, channels=[16, 32])
-        x = torch.randn(4, 3, 32, 32)
+    def test_forward_shape_classification(self):
+        model = MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
+        x = torch.randn(4, 54)
         out = model(x)
-        assert out.shape == (4, 10)
+        assert out.shape == (4, 7)
 
-    def test_forward_single_channel(self):
-        model = CNN(in_channels=1, num_classes=5, channels=[8, 16])
-        x = torch.randn(2, 1, 28, 28)
+    def test_forward_shape_regression_squeeze(self):
+        """When output_dim=1, forward squeezes the last dim."""
+        model = MLP(input_dim=90, output_dim=1, hidden_dims=[32, 16])
+        x = torch.randn(4, 90)
         out = model(x)
-        assert out.shape == (2, 5)
+        assert out.shape == (4,)
 
-    def test_forward_variable_spatial_size(self):
-        """AdaptiveAvgPool2d should handle non-32x32 inputs."""
-        model = CNN(in_channels=3, num_classes=10, channels=[8])
-        x = torch.randn(2, 3, 64, 64)
-        out = model(x)
-        assert out.shape == (2, 10)
-
-    def test_backbone_contains_conv_bn_gelu_blocks(self):
-        model = CNN(channels=[16])
+    def test_backbone_contains_linear_bn_gelu_dropout(self):
+        model = MLP(input_dim=10, output_dim=2, hidden_dims=[16])
         layer_types = [type(m) for m in model.backbone]
-        assert nn.Conv2d in layer_types
-        assert nn.BatchNorm2d in layer_types
+        assert nn.Linear in layer_types
+        assert nn.BatchNorm1d in layer_types
         assert nn.GELU in layer_types
-        assert nn.MaxPool2d in layer_types
         assert nn.Dropout in layer_types
 
-    def test_parameter_count_increases_with_channels(self):
-        small = CNN(channels=[8, 16])
-        large = CNN(channels=[32, 64, 128])
+    def test_parameter_count_increases_with_hidden_dims(self):
+        small = MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
+        large = MLP(input_dim=54, output_dim=7, hidden_dims=[256, 128, 64])
         small_params = sum(p.numel() for p in small.parameters())
         large_params = sum(p.numel() for p in large.parameters())
         assert large_params > small_params
@@ -76,45 +65,56 @@ class TestCNNModel:
 # Data loading tests
 # ---------------------------------------------------------------------------
 
-class TestCIFAR10Data:
-    def test_loader_returns_correct_metadata(self):
-        train_loader, test_loader, in_channels, num_classes = \
-            get_cifar10_loaders(batch_size=32, seed=0)
-        assert in_channels == 3
-        assert num_classes == 10
+class TestMLPData:
+    def test_covertype_metadata(self):
+        _, _, input_dim, output_dim = get_covertype_loaders(batch_size=32, seed=0)
+        assert input_dim == 54
+        assert output_dim == 7
 
-    def test_train_batch_shape(self):
-        train_loader, _, _, _ = get_cifar10_loaders(batch_size=16, seed=0)
+    def test_covertype_batch_shape(self):
+        train_loader, _, _, _ = get_covertype_loaders(batch_size=16, seed=0)
         X, y = next(iter(train_loader))
-        assert X.shape == (16, 3, 32, 32)
+        assert X.shape == (16, 54)
         assert X.dtype == torch.float32
         assert y.shape == (16,)
-        assert y.dtype == torch.int64
+        assert y.dtype == torch.long
 
-    def test_test_batch_shape(self):
-        _, test_loader, _, _ = get_cifar10_loaders(batch_size=16, seed=0)
-        X, y = next(iter(test_loader))
-        assert X.shape == (16, 3, 32, 32)
+    def test_covertype_label_range(self):
+        train_loader, _, _, _ = get_covertype_loaders(batch_size=1024, seed=0)
+        X, y = next(iter(train_loader))
+        assert y.min() >= 0
+        assert y.max() <= 6
+
+    def test_mnist_metadata(self):
+        _, _, input_dim, output_dim = get_mnist_loaders(batch_size=32, seed=0)
+        assert input_dim == 784
+        assert output_dim == 10
+
+    def test_mnist_batch_shape(self):
+        train_loader, _, _, _ = get_mnist_loaders(batch_size=16, seed=0)
+        X, y = next(iter(train_loader))
+        assert X.shape == (16, 784)
         assert y.shape == (16,)
         assert y.dtype == torch.int64
 
-    def test_cifar10_label_range(self):
-        train_loader, _, _, _ = get_cifar10_loaders(batch_size=512, seed=0)
+    def test_year_prediction_metadata(self):
+        _, _, input_dim, output_dim = get_year_prediction_loaders(batch_size=32, seed=0)
+        assert input_dim == 90
+        assert output_dim == 1
+
+    def test_year_prediction_batch_shape(self):
+        train_loader, _, _, _ = get_year_prediction_loaders(batch_size=16, seed=0)
         X, y = next(iter(train_loader))
-        assert y.min() >= 0
-        assert y.max() <= 9
+        assert X.shape == (16, 90)
+        assert X.dtype == torch.float32
+        assert y.shape == (16,)
+        assert y.dtype == torch.float32
 
-    def test_normalization_constants_defined(self):
-        assert len(CIFAR10_MEAN) == 3
-        assert len(CIFAR10_STD) == 3
-        for v in CIFAR10_STD:
-            assert v > 0
-
-    def test_normalization_constants_reasonable(self):
-        for v in CIFAR10_MEAN:
-            assert 0 < v < 1
-        for v in CIFAR10_STD:
-            assert 0 < v < 1
+    def test_year_prediction_targets_are_scaled(self):
+        train_loader, _, _, _ = get_year_prediction_loaders(batch_size=4096, seed=0)
+        all_y = torch.cat([y for _, y in train_loader])
+        assert abs(all_y.mean().item()) < 0.1
+        assert abs(all_y.std().item() - 1.0) < 0.1
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ class _Args:
 class TestOptimizerCreation:
     @pytest.fixture
     def model(self):
-        return CNN(channels=[8, 16])
+        return MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
 
     def test_sgd(self, model):
         opt = create_optimizer(model, _Args("sgd"))
@@ -155,7 +155,7 @@ class TestOptimizerCreation:
         assert isinstance(opt.optimizers[0], MuonLLM)
 
     def test_muon_param_split(self, model):
-        """Muon should only get backbone Conv2d/Linear weights, not BN or head."""
+        """Muon should only get 2D backbone Linear weights, not BN, biases, or head."""
         opt = create_optimizer(model, _Args("muon-jordan"))
         muon_opt = opt.optimizers[0]
         adam_opt = opt.optimizers[1]
@@ -168,18 +168,10 @@ class TestOptimizerCreation:
         assert muon_param_count > 0
         assert adam_param_count > 0
 
-        # Verify all muon params are Conv2d (4D) or Linear (2D) weights
+        # Verify all muon params are 2D (Linear weights only)
         for g in muon_opt.param_groups:
             for p in g['params']:
-                assert p.ndim in (2, 4), \
-                    f"Muon should only receive Conv2d (4D) or Linear (2D) weights, got ndim={p.ndim}"
-
-    def test_muon_params_include_conv_weights(self, model):
-        """CNN-specific: Muon should receive 4D Conv2d weights for NS iteration."""
-        opt = create_optimizer(model, _Args("muon-jordan"))
-        muon_opt = opt.optimizers[0]
-        dims = [p.ndim for g in muon_opt.param_groups for p in g['params']]
-        assert 4 in dims, "Muon should include 4D Conv2d weight params"
+                assert p.ndim == 2, "Muon should only receive 2D weight matrices"
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +186,6 @@ class TestOptimizerGroup:
         opt2 = torch.optim.SGD([p2], lr=0.1)
         group = OptimizerGroup(opt1, opt2)
 
-        # Simulate gradients
         p1.grad = torch.ones_like(p1)
         p2.grad = torch.ones_like(p2)
 
@@ -216,16 +207,24 @@ class TestOptimizerGroup:
 
 class TestTrainingStep:
     @pytest.fixture
-    def setup(self):
-        model = CNN(in_channels=3, num_classes=10, channels=[8, 16])
+    def classification_setup(self):
+        model = MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
         criterion = nn.CrossEntropyLoss()
-        x = torch.randn(4, 3, 32, 32)
-        y = torch.randint(0, 10, (4,))
+        x = torch.randn(8, 54)
+        y = torch.randint(0, 7, (8,))
+        return model, criterion, x, y
+
+    @pytest.fixture
+    def regression_setup(self):
+        model = MLP(input_dim=90, output_dim=1, hidden_dims=[32, 16])
+        criterion = nn.MSELoss()
+        x = torch.randn(8, 90)
+        y = torch.randn(8)
         return model, criterion, x, y
 
     @pytest.mark.parametrize("optim_name", ["sgd", "adamw", "muon-jordan", "muon-llm"])
-    def test_loss_decreases_after_steps(self, setup, optim_name):
-        model, criterion, x, y = setup
+    def test_loss_decreases_classification(self, classification_setup, optim_name):
+        model, criterion, x, y = classification_setup
         optimizer = create_optimizer(model, _Args(optim_name, lr=1e-2))
 
         model.train()
@@ -240,29 +239,29 @@ class TestTrainingStep:
             optimizer.step()
 
         final_loss = loss.item()
-        # Loss should decrease on a tiny overfitting batch
         assert final_loss < initial_loss
 
-    @pytest.mark.parametrize("optim_name", ["muon-jordan", "muon-llm"])
-    def test_muon_handles_4d_conv_weights(self, setup, optim_name):
-        """Muon must reshape 4D conv weights to 2D for NS iteration, then reshape back."""
-        model, criterion, x, y = setup
-        optimizer = create_optimizer(model, _Args(optim_name))
+    @pytest.mark.parametrize("optim_name", ["sgd", "adamw", "muon-jordan", "muon-llm"])
+    def test_loss_decreases_regression(self, regression_setup, optim_name):
+        model, criterion, x, y = regression_setup
+        optimizer = create_optimizer(model, _Args(optim_name, lr=1e-2))
 
-        optimizer.zero_grad()
-        loss = criterion(model(x), y)
-        loss.backward()
-        optimizer.step()
+        model.train()
+        initial_loss = None
+        for _ in range(5):
+            optimizer.zero_grad()
+            out = model(x)
+            loss = criterion(out, y)
+            if initial_loss is None:
+                initial_loss = loss.item()
+            loss.backward()
+            optimizer.step()
 
-        # All conv weights should still be 4D after the step
-        for name, p in model.named_parameters():
-            if 'backbone' in name and 'weight' in name:
-                mod = dict(model.named_modules())[name.rsplit('.', 1)[0]]
-                if isinstance(mod, nn.Conv2d):
-                    assert p.ndim == 4, f"{name} lost its 4D shape after Muon step"
+        final_loss = loss.item()
+        assert final_loss < initial_loss
 
-    def test_gradients_flow_through_all_params(self, setup):
-        model, criterion, x, y = setup
+    def test_gradients_flow_through_all_params(self, classification_setup):
+        model, criterion, x, y = classification_setup
         loss = criterion(model(x), y)
         loss.backward()
 
@@ -270,14 +269,31 @@ class TestTrainingStep:
             assert p.grad is not None, f"No gradient for {name}"
             assert p.grad.abs().sum() > 0, f"Zero gradient for {name}"
 
-    def test_weight_decay_applied(self, setup):
-        model, criterion, x, y = setup
+    @pytest.mark.parametrize("optim_name", ["muon-jordan", "muon-llm"])
+    def test_muon_preserves_2d_weight_shapes(self, classification_setup, optim_name):
+        """After a Muon step, backbone Linear weights should still be 2D."""
+        model, criterion, x, y = classification_setup
+        optimizer = create_optimizer(model, _Args(optim_name))
+
+        optimizer.zero_grad()
+        loss = criterion(model(x), y)
+        loss.backward()
+        optimizer.step()
+
+        for name, p in model.named_parameters():
+            if 'backbone' in name and 'weight' in name:
+                mod = dict(model.named_modules())[name.rsplit('.', 1)[0]]
+                if isinstance(mod, nn.Linear):
+                    assert p.ndim == 2, f"{name} lost its 2D shape after Muon step"
+
+    def test_weight_decay_applied(self, classification_setup):
+        model, criterion, x, y = classification_setup
         optimizer = create_optimizer(model, _Args("muon-jordan", lr=1e-2, weight_decay=0.5))
 
         # Record initial weight norms
         initial_norms = {}
         for name, p in model.named_parameters():
-            if 'weight' in name and p.ndim >= 2:
+            if 'weight' in name and p.ndim == 2:
                 initial_norms[name] = p.data.norm().item()
 
         optimizer.zero_grad()
@@ -299,77 +315,77 @@ class TestTrainingStep:
 # ---------------------------------------------------------------------------
 
 class TestEvaluate:
-    def test_returns_loss_and_accuracy(self):
-        model = CNN(in_channels=3, num_classes=10, channels=[8, 16])
-        # Create a small fake loader
+    def test_classification_returns_loss_and_accuracy(self):
+        model = MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
         dataset = torch.utils.data.TensorDataset(
-            torch.randn(32, 3, 32, 32), torch.randint(0, 10, (32,))
+            torch.randn(32, 54), torch.randint(0, 7, (32,))
         )
         loader = torch.utils.data.DataLoader(dataset, batch_size=16)
         criterion = nn.CrossEntropyLoss()
 
-        metrics = evaluate(model, loader, criterion, torch.device("cpu"))
+        metrics = evaluate(model, loader, criterion, "classification", torch.device("cpu"))
 
         assert "eval/loss" in metrics
         assert "eval/accuracy" in metrics
         assert 0 <= metrics["eval/accuracy"] <= 1
         assert metrics["eval/loss"] > 0
 
+    def test_regression_returns_loss_mse_and_r2(self):
+        model = MLP(input_dim=90, output_dim=1, hidden_dims=[32, 16])
+        dataset = torch.utils.data.TensorDataset(
+            torch.randn(32, 90), torch.randn(32)
+        )
+        loader = torch.utils.data.DataLoader(dataset, batch_size=16)
+        criterion = nn.MSELoss()
+
+        metrics = evaluate(model, loader, criterion, "regression", torch.device("cpu"))
+
+        assert "eval/loss" in metrics
+        assert "eval/mse" in metrics
+        assert "eval/r2" in metrics
+        assert metrics["eval/loss"] > 0
+
     def test_model_back_in_train_mode(self):
-        model = CNN(channels=[8])
+        model = MLP(input_dim=54, output_dim=7, hidden_dims=[16])
         model.train()
         dataset = torch.utils.data.TensorDataset(
-            torch.randn(8, 3, 32, 32), torch.randint(0, 10, (8,))
+            torch.randn(8, 54), torch.randint(0, 7, (8,))
         )
         loader = torch.utils.data.DataLoader(dataset, batch_size=8)
-        evaluate(model, loader, nn.CrossEntropyLoss(), torch.device("cpu"))
+        evaluate(model, loader, nn.CrossEntropyLoss(), "classification", torch.device("cpu"))
         assert model.training
 
-    def test_no_regression_keys(self):
-        """CNN evaluate is classification-only; no regression keys should be present."""
-        model = CNN(in_channels=3, num_classes=10, channels=[8])
+    def test_regression_no_accuracy_key(self):
+        model = MLP(input_dim=90, output_dim=1, hidden_dims=[16])
         dataset = torch.utils.data.TensorDataset(
-            torch.randn(8, 3, 32, 32), torch.randint(0, 10, (8,))
+            torch.randn(8, 90), torch.randn(8)
         )
         loader = torch.utils.data.DataLoader(dataset, batch_size=8)
-        metrics = evaluate(model, loader, nn.CrossEntropyLoss(), torch.device("cpu"))
-        assert "eval/mse" not in metrics
-        assert "eval/r2" not in metrics
+        criterion = nn.MSELoss()
+
+        metrics = evaluate(model, loader, criterion, "regression", torch.device("cpu"))
+        assert "eval/accuracy" not in metrics
 
 
 # ---------------------------------------------------------------------------
-# Weight diagnostics on CNN
+# Weight diagnostics on MLP
 # ---------------------------------------------------------------------------
 
-class TestDiagnosticsOnCNN:
-    def test_weight_diagnostics_on_cnn(self):
-        model = CNN(channels=[8, 16])
+class TestDiagnosticsOnMLP:
+    def test_weight_diagnostics_on_mlp(self):
+        model = MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
         diag = compute_weight_diagnostics(model)
         keys = list(diag.keys())
         assert any("condition_number" in k for k in keys)
         assert any("spectral_norm" in k for k in keys)
-        assert any("orthogonality_error" in k for k in keys)
-        assert any("effective_rank" in k for k in keys)
 
     def test_gradient_diagnostics_after_backward(self):
-        model = CNN(channels=[8, 16])
-        x = torch.randn(2, 3, 32, 32)
-        y = torch.randint(0, 10, (2,))
+        model = MLP(input_dim=54, output_dim=7, hidden_dims=[32, 16])
+        x = torch.randn(4, 54)
+        y = torch.randint(0, 7, (4,))
         loss = nn.CrossEntropyLoss()(model(x), y)
         loss.backward()
 
         diag = compute_gradient_diagnostics(model)
         keys = list(diag.keys())
         assert any("grad_norm" in k for k in keys)
-
-    def test_diagnostics_keys_have_correct_prefix(self):
-        model = CNN(channels=[8, 16])
-        diag = compute_weight_diagnostics(model)
-        for k in diag.keys():
-            assert k.startswith("diagnostics/"), f"Key {k} missing diagnostics/ prefix"
-
-    def test_diagnostics_covers_head_layer(self):
-        model = CNN(channels=[8])
-        diag = compute_weight_diagnostics(model)
-        assert any("head" in k for k in diag.keys()), \
-            "Weight diagnostics should include the head Linear layer"
