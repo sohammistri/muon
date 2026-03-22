@@ -32,7 +32,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
-def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
+def muon_update_jordan(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)  # momentum = beta * momentum + (1-beta) * grad
     update = momentum*beta + grad*(1-beta) if nesterov else momentum
 
@@ -44,7 +44,19 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     return update
 
 
-class Muon(optim.Optimizer):
+def muon_update_llm(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
+    momentum.lerp_(grad, 1 - beta)
+    update = momentum*beta + grad*(1-beta) if nesterov else momentum
+
+    if update.ndim == 4:
+        update = update.view(update.shape[0], -1)
+
+    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+    update *= 0.2 * max(grad.size(-2), grad.size(-1))**0.5
+    return update
+
+
+class MuonJordan(optim.Optimizer):
     def __init__(self, params, lr=0.01, momentum=0.95, steps=5,
                  weight_decay=0, nesterov=True, maximize=False,
                  adam_betas=(0.9, 0.999), adam_eps=1e-8):
@@ -92,7 +104,84 @@ class Muon(optim.Optimizer):
                         state['momentum_buffer'] = torch.zeros_like(grad)
 
                     org_shape = p.shape
-                    orthogonal_buff = muon_update(grad, state["momentum_buffer"],
+                    orthogonal_buff = muon_update_jordan(grad, state["momentum_buffer"],
+                                                beta=momentum, ns_steps=steps, nesterov=nesterov)
+                    if p.ndim == 4:
+                        orthogonal_buff = orthogonal_buff.view(org_shape)
+
+                    p.add_(orthogonal_buff, alpha=-lr)
+                else:
+                    # For non-matrix parameters (biases, BatchNorm), use Adam
+                    beta1, beta2 = group['adam_betas']
+                    eps = group['adam_eps']
+
+                    if 'exp_avg' not in state:
+                        state['exp_avg'] = torch.zeros_like(grad)
+                        state['exp_avg_sq'] = torch.zeros_like(grad)
+                        state['step'] = 0
+
+                    state['step'] += 1
+                    exp_avg = state['exp_avg']
+                    exp_avg_sq = state['exp_avg_sq']
+
+                    exp_avg.lerp_(grad, 1 - beta1)
+                    exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                    bias_corr1 = 1 - beta1 ** state['step']
+                    bias_corr2 = 1 - beta2 ** state['step']
+
+                    update = (exp_avg / bias_corr1) / ((exp_avg_sq / bias_corr2).sqrt() + eps)
+                    p.add_(update, alpha=-lr)
+
+        return loss
+
+
+class MuonLLM(optim.Optimizer):
+    def __init__(self, params, lr=0.01, momentum=0.95, steps=5,
+                 weight_decay=0, nesterov=True, maximize=False,
+                 adam_betas=(0.9, 0.999), adam_eps=1e-8):
+
+        defaults = dict(lr=lr, momentum=momentum, steps=steps,
+                        weight_decay=weight_decay, nesterov=nesterov,
+                        adam_betas=adam_betas, adam_eps=adam_eps)
+        self.maximize = maximize
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            steps = group['steps']
+            weight_decay = group['weight_decay']
+            nesterov = group['nesterov']
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                if self.maximize:
+                    grad = -p.grad
+                else:
+                    grad = p.grad
+
+                state = self.state[p]
+
+                # Apply weight decay directly to parameters (AdamW style)
+                if weight_decay != 0:
+                    p.mul_(1 - lr * weight_decay)
+
+                if p.ndim >= 2:
+                    if 'momentum_buffer' not in state:
+                        state['momentum_buffer'] = torch.zeros_like(grad)
+
+                    org_shape = p.shape
+                    orthogonal_buff = muon_update_llm(grad, state["momentum_buffer"],
                                                 beta=momentum, ns_steps=steps, nesterov=nesterov)
                     if p.ndim == 4:
                         orthogonal_buff = orthogonal_buff.view(org_shape)

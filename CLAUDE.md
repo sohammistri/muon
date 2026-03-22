@@ -1,0 +1,37 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This repo implements the **Muon optimizer** (Newton-Schulz orthogonalization-based optimizer) and benchmarks it against SGD and AdamW on tabular/image MLP tasks. Experiment tracking uses Weights & Biases.
+
+## Commands
+
+```bash
+# Install dependencies (uses uv with Python 3.13)
+uv sync
+
+# Run MLP benchmark (main entry point)
+uv run python MLP/train.py --optim muon --dataset mnist --epochs 10
+
+# Run with diagnostics (SVD metrics, gradient norms logged to W&B)
+uv run python MLP/train.py --optim muon --dataset covertype --log_diagnostics
+
+# Available datasets: covertype (classification), year_prediction (regression), mnist (classification)
+# Available optimizers: sgd, adamw, muon
+```
+
+## Architecture
+
+- **`muon.py`** — Core Muon optimizer. Uses Newton-Schulz iteration (`zeropower_via_newtonschulz5`) to approximate orthogonal projection of gradient matrices. Falls back to Adam for non-matrix params (biases, BatchNorm). The NS iteration uses quintic coefficients `(a, b, c) = (3.4445, -4.7750, 2.0315)` optimized for maximal slope at zero.
+
+- **`MLP/train.py`** — Training script and CLI entry point. When using Muon, wraps it with `OptimizerGroup` that pairs Muon (for backbone Linear weights) with AdamW (for head, biases, BatchNorm params). This split is important — only 2D backbone Linear weights go through Newton-Schulz.
+
+- **`MLP/model.py`** — Generic MLP with configurable hidden dims. Uses BatchNorm + GELU + Dropout blocks in the backbone, separate Linear head.
+
+- **`MLP/data.py`** — Data loaders for three datasets: Forest Covertype (sklearn), Year Prediction MSD (UCI download), MNIST (torchvision). All apply StandardScaler normalization. Cached in `MLP/data_cache/`.
+
+- **`common/metrics.py`** — SVD-based weight diagnostics (condition number, effective rank, spectral norm, orthogonality error) and gradient diagnostics. These are the key metrics for understanding Muon's effect on weight matrices.
+
+- **`common/logger.py`** — Colored console + file logging. Logs saved to `logs/`.

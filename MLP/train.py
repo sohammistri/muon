@@ -10,7 +10,7 @@ from tqdm import tqdm
 # Add parent directory so we can import muon.py
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from muon import Muon
+from muon import MuonJordan, MuonLLM
 from MLP.model import MLP
 from MLP.data import get_covertype_loaders, get_year_prediction_loaders, get_mnist_loaders
 from common.logger import setup_logger
@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--dataset", choices=["covertype", "year_prediction", "mnist"],
                         default=None,
                         help="Dataset to use. Overrides --task. Default: inferred from --task")
-    parser.add_argument("--optim", choices=["sgd", "adamw", "muon"],
+    parser.add_argument("--optim", choices=["sgd", "adamw", "muon-jordan", "muon-llm"],
                         default="adamw")
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=10)
@@ -73,7 +73,7 @@ def create_optimizer(model, args):
     elif args.optim == "adamw":
         return torch.optim.AdamW(model.parameters(), lr=args.lr,
                                  weight_decay=args.weight_decay)
-    elif args.optim == "muon":
+    elif args.optim in ("muon-jordan", "muon-llm"):
         # Only backbone Linear weights get Newton-Schulz; everything else gets AdamW
         modules = dict(model.named_modules())
         muon_params = []
@@ -86,9 +86,11 @@ def create_optimizer(model, args):
         muon_ids = {id(p) for p in muon_params}
         adam_params = [p for p in model.parameters() if id(p) not in muon_ids]
 
+        MuonCls = MuonJordan if args.optim == "muon-jordan" else MuonLLM
+
         return OptimizerGroup(
-            Muon(muon_params, lr=args.lr, momentum=0.95, steps=5,
-                 weight_decay=args.weight_decay, nesterov=True),
+            MuonCls(muon_params, lr=args.lr, momentum=0.95, steps=5,
+                    weight_decay=args.weight_decay, nesterov=True),
             torch.optim.AdamW(adam_params, lr=args.lr,
                               weight_decay=args.weight_decay),
         )
