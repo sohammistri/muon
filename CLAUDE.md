@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This repo implements the **Muon optimizer** (Newton-Schulz orthogonalization-based optimizer) and benchmarks it against SGD and AdamW on tabular/image MLP tasks. Experiment tracking uses Weights & Biases.
+This repo implements the **Muon optimizer** (Newton-Schulz orthogonalization-based optimizer) and benchmarks it against SGD and AdamW on MLP and CNN tasks. Experiment tracking uses Weights & Biases.
 
 ## Commands
 
@@ -19,7 +19,15 @@ uv run python MLP/train.py --optim muon --dataset mnist --epochs 10
 uv run python MLP/train.py --optim muon --dataset covertype --log_diagnostics
 
 # Available datasets: covertype (classification), year_prediction (regression), mnist (classification)
-# Available optimizers: sgd, adamw, muon
+# Available optimizers: sgd, adamw, muon-jordan, muon-llm
+
+# Run CNN benchmark
+uv run python CNN/train.py --optim muon-jordan --dataset cifar10 --epochs 20
+
+# Run CNN with diagnostics
+uv run python CNN/train.py --optim muon-llm --dataset cifar10 --log_diagnostics
+
+# Available CNN datasets: cifar10 (classification)
 ```
 
 ## Architecture
@@ -31,6 +39,12 @@ uv run python MLP/train.py --optim muon --dataset covertype --log_diagnostics
 - **`MLP/model.py`** — Generic MLP with configurable hidden dims. Uses BatchNorm + GELU + Dropout blocks in the backbone, separate Linear head.
 
 - **`MLP/data.py`** — Data loaders for three datasets: Forest Covertype (sklearn), Year Prediction MSD (UCI download), MNIST (torchvision). All apply StandardScaler normalization. Cached in `MLP/data_cache/`.
+
+- **`CNN/train.py`** — CNN training script and CLI entry point. Same OptimizerGroup pattern as MLP — backbone Conv2d and Linear weights go through Newton-Schulz, head/biases/BatchNorm go to AdamW. Muon handles 4D conv weights by reshaping to 2D internally.
+
+- **`CNN/model.py`** — Simple CNN with configurable channel widths. Backbone uses Conv2d-BN-GELU blocks with MaxPool2d, separate Linear head. AdaptiveAvgPool2d bridges backbone to head.
+
+- **`CNN/data.py`** — CIFAR-10 data loader with standard augmentation (RandomCrop, RandomHorizontalFlip). Cached in `CNN/data_cache/`.
 
 - **`common/metrics.py`** — SVD-based weight diagnostics (condition number, effective rank, spectral norm, orthogonality error) and gradient diagnostics. These are the key metrics for understanding Muon's effect on weight matrices.
 
