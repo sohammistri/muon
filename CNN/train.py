@@ -129,6 +129,7 @@ def main():
 
     # Create model
     model = CNN(in_channels, num_classes, args.channels, args.dropout).to(device)
+    model = torch.compile(model)
     param_count = sum(p.numel() for p in model.parameters())
     log.info(f"Model parameters: {param_count:,}")
 
