@@ -432,7 +432,7 @@ def main():
     if args.wandb and ddp_rank == 0:
         wandb.init(
             project="muon",
-            name=f"gpt2-{args.optim}-{args.precision}",
+            name=f"gpt2-d{args.depth}-lr_{args.lr}-steps_{args.max_steps}-{args.optim}-{args.precision}",
             config=vars(args),
         )
         wb = wandb
