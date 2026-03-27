@@ -27,6 +27,8 @@ from GPT2.common import (
     DummyWandb,
 )
 from GPT2.checkpoint import save_checkpoint, load_checkpoint, find_latest_step
+from GPT2.dataset import list_parquet_files
+from GPT2.tokenizer import get_tokenizer
 from common.logger import setup_logger
 from common.metrics import compute_weight_diagnostics, compute_gradient_diagnostics
 
@@ -49,8 +51,8 @@ def parse_args():
     parser.add_argument("--optim", choices=["adamw", "muon-jordan", "muon-llm"],
                         default="adamw")
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--max_steps", type=int, default=10000,
-                        help="Total training steps")
+    parser.add_argument("--max_steps", type=int, default=None,
+                        help="Total training steps (auto-computed for 1 epoch if omitted)")
     parser.add_argument("--batch_size", type=int, default=64,
                         help="Sequences per batch")
     parser.add_argument("--weight_decay", type=float, default=0.1)
@@ -116,13 +118,8 @@ def parse_args():
         parser.error("context_window must be positive")
     if args.depth <= 0:
         parser.error("depth must be positive")
-    if args.max_steps <= 0:
+    if args.max_steps is not None and args.max_steps <= 0:
         parser.error("max_steps must be positive")
-    if args.warmup_steps >= args.max_steps:
-        parser.error(
-            f"warmup_steps ({args.warmup_steps}) must be less than "
-            f"max_steps ({args.max_steps})"
-        )
 
     if args.precision == "bf16" and torch.cuda.is_available():
         cap = torch.cuda.get_device_capability()
@@ -222,6 +219,52 @@ def set_lr(optimizer, lr):
             pg["lr"] = lr
 
 
+def estimate_epoch_steps(batch_size, context_window, ddp_world_size, num_sample_rgs=3):
+    """Estimate training steps per epoch by sampling row groups for token counts.
+
+    Reads parquet metadata (instant) for total doc count, tokenizes a small
+    sample of row groups to get avg tokens/doc, then extrapolates.
+    Accounts for ~35% cropping loss from BOS-aligned best-fit packing.
+    """
+    import pyarrow.parquet as pq
+
+    parquet_paths = list_parquet_files()
+    train_paths = parquet_paths[:-1]  # last shard is validation
+
+    # Count total documents from parquet metadata (no data reading)
+    total_docs = 0
+    sample_rgs = []
+    for path in train_paths:
+        pf = pq.ParquetFile(path)
+        total_docs += pf.metadata.num_rows
+        # Collect candidate row groups for sampling
+        for rg_idx in range(pf.num_row_groups):
+            if len(sample_rgs) < num_sample_rgs:
+                sample_rgs.append((path, rg_idx))
+
+    # Tokenize sampled row groups to estimate avg tokens per document
+    tokenizer = get_tokenizer()
+    bos_token = tokenizer.get_bos_token_id()
+    sample_tokens = 0
+    sample_docs = 0
+    for path, rg_idx in sample_rgs:
+        pf = pq.ParquetFile(path)
+        rg = pf.read_row_group(rg_idx)
+        texts = rg.column('text').to_pylist()
+        token_lists = tokenizer.encode(texts, prepend=bos_token, num_threads=4)
+        sample_tokens += sum(len(t) for t in token_lists)
+        sample_docs += len(texts)
+
+    avg_tokens_per_doc = sample_tokens / max(sample_docs, 1)
+    total_tokens = int(total_docs * avg_tokens_per_doc)
+    # ~35% of tokens are cropped due to BOS-aligned best-fit packing
+    effective_tokens = int(total_tokens * 0.65)
+    tokens_per_step = batch_size * context_window * ddp_world_size
+    steps_per_epoch = effective_tokens // tokens_per_step
+
+    return total_tokens, effective_tokens, steps_per_epoch
+
+
 @torch.no_grad()
 def evaluate(model, val_loader, val_steps, precision_ctx):
     model.eval()
@@ -269,6 +312,32 @@ def main():
     if ddp_rank == 0:
         log.info(f"Device: {device} | DDP: {use_ddp} (world_size={ddp_world_size})")
         log.info(f"Precision: {args.precision}")
+
+    # Estimate epoch steps and auto-set max_steps if not provided
+    total_tokens, effective_tokens, steps_per_epoch = estimate_epoch_steps(
+        args.batch_size, args.context_window, ddp_world_size,
+    )
+    if ddp_rank == 0:
+        log.info(
+            f"Epoch estimate: {total_tokens:,} total tokens, "
+            f"{effective_tokens:,} effective tokens (after ~35% cropping), "
+            f"~{steps_per_epoch:,} steps/epoch"
+        )
+    if args.max_steps is None:
+        args.max_steps = steps_per_epoch
+        if ddp_rank == 0:
+            log.info(f"--max_steps not set, auto-setting to 1 epoch: {args.max_steps:,} steps")
+    else:
+        if ddp_rank == 0:
+            epochs_covered = args.max_steps / max(steps_per_epoch, 1)
+            log.info(f"Training for {args.max_steps:,} steps (~{epochs_covered:.2f} epochs)")
+
+    # Validate warmup vs max_steps (deferred since max_steps may be auto-computed)
+    if args.warmup_steps >= args.max_steps:
+        raise ValueError(
+            f"warmup_steps ({args.warmup_steps}) must be less than "
+            f"max_steps ({args.max_steps})"
+        )
 
     # Resolve checkpoint for resume
     ckpt_data = None
