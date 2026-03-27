@@ -315,6 +315,7 @@ def main():
     else:
         peak_flops = float("inf")
     tokens_per_step = args.batch_size * args.context_window * ddp_world_size
+    tokens_per_gpu_step = args.batch_size * args.context_window
 
     # Step-0 evaluation
     global_step = 0
@@ -364,7 +365,7 @@ def main():
         t0 = t1
 
         tokens_per_sec = tokens_per_step / dt
-        flops_per_step = 6 * param_count * tokens_per_step
+        flops_per_step = 6 * param_count * tokens_per_gpu_step
         mfu = flops_per_step / (peak_flops * dt)
 
         # Log training metrics
