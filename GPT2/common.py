@@ -269,8 +269,8 @@ class LocalMetricLogger:
                     counts, edges = v.histogram
                 record[k] = {
                     "_type": "histogram",
-                    "bin_edges": edges.tolist(),
-                    "counts": counts.tolist(),
+                    "bin_edges": edges,
+                    "counts": counts,
                 }
             elif isinstance(v, (list, tuple)):
                 record[k] = list(v)
@@ -310,7 +310,11 @@ def get_peak_flops(device_name: str) -> float:
         (["h800", "nvl"], 989e12),
         (["h800"], 756e12),
         # NVIDIA Ampere data center
+        (["a100", "sxm"], 312e12),
+        (["a100", "pcie"], 312e12),
         (["a100"], 312e12),
+        (["a800", "sxm"], 312e12),
+        (["a800", "pcie"], 312e12),
         (["a800"], 312e12),
         (["a40"], 149.7e12),
         (["a30"], 165e12),
