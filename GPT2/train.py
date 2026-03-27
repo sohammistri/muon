@@ -26,6 +26,7 @@ from GPT2.common import (
     get_peak_flops,
     DummyWandb,
 )
+from GPT2.checkpoint import save_checkpoint, load_checkpoint, find_latest_step
 from common.logger import setup_logger
 from common.metrics import compute_weight_diagnostics, compute_gradient_diagnostics
 
@@ -81,6 +82,18 @@ def parse_args():
     parser.add_argument("--wandb", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="Enable W&B logging (--no-wandb to disable)")
+
+    # Checkpointing
+    parser.add_argument("--save_every", type=int, default=0,
+                        help="Save checkpoint every N steps (0 = disabled)")
+    parser.add_argument("--checkpoint_dir", type=str, default="GPT2/checkpoints",
+                        help="Directory for saving/loading checkpoints")
+    parser.add_argument("--resume", type=str, default=None, nargs="?", const="auto",
+                        help="Resume from checkpoint: bare flag auto-detects latest, "
+                             "or pass a checkpoint dir path")
+    parser.add_argument("--resume_lr", action="store_true",
+                        help="Use saved LR from checkpoint instead of recomputing "
+                             "from schedule (avoids LR jump if schedule changed)")
 
     args = parser.parse_args()
 
@@ -152,6 +165,13 @@ class OptimizerGroup:
     def step(self):
         for opt in self.optimizers:
             opt.step()
+
+    def state_dict(self):
+        return [opt.state_dict() for opt in self.optimizers]
+
+    def load_state_dict(self, state_dicts):
+        for opt, sd in zip(self.optimizers, state_dicts):
+            opt.load_state_dict(sd)
 
 
 def create_optimizer(model, args):
@@ -250,9 +270,46 @@ def main():
         log.info(f"Device: {device} | DDP: {use_ddp} (world_size={ddp_world_size})")
         log.info(f"Precision: {args.precision}")
 
-    # Data
+    # Resolve checkpoint for resume
+    ckpt_data = None
+    start_step = 1
+    if args.resume is not None:
+        if args.resume == "auto":
+            latest_step = find_latest_step(args.checkpoint_dir)
+            if latest_step is None:
+                if ddp_rank == 0:
+                    log.info("No checkpoint found, starting from scratch")
+            else:
+                if ddp_rank == 0:
+                    log.info(f"Auto-detected checkpoint at step {latest_step}")
+                ckpt_data = load_checkpoint(
+                    args.checkpoint_dir, latest_step, device,
+                    rank=ddp_rank, use_ddp=use_ddp,
+                )
+        else:
+            # args.resume is a checkpoint dir path — find latest step in it
+            latest_step = find_latest_step(args.resume)
+            if latest_step is None:
+                raise FileNotFoundError(
+                    f"No checkpoint found in {args.resume}"
+                )
+            if ddp_rank == 0:
+                log.info(f"Resuming from {args.resume} step {latest_step}")
+            ckpt_data = load_checkpoint(
+                args.resume, latest_step, device,
+                rank=ddp_rank, use_ddp=use_ddp,
+            )
+
+    if ckpt_data is not None:
+        start_step = ckpt_data["step"] + 1
+        if ddp_rank == 0:
+            log.info(f"Resuming training from step {start_step}")
+
+    # Data (pass resume state if available)
+    data_resume = ckpt_data["meta"]["data_state"] if ckpt_data else None
     train_loader, val_loader, vocab_size = get_pretraining_loaders(
         B=args.batch_size, T=args.context_window, device=device,
+        resume_state_dict=data_resume,
     )
     if ddp_rank == 0:
         log.info(f"Vocab size: {vocab_size:,}")
@@ -267,6 +324,12 @@ def main():
         dropout=args.dropout,
     ).to(device)
 
+    # Restore model weights before optimizer creation and fp8 conversion
+    if ckpt_data is not None:
+        model.load_state_dict(ckpt_data["model_state_dict"])
+        if ddp_rank == 0:
+            log.info(f"Restored model weights from step {ckpt_data['step']}")
+
     param_count = sum(p.numel() for p in model.parameters())
     if ddp_rank == 0:
         log.info(
@@ -277,6 +340,12 @@ def main():
 
     # Optimizer (BEFORE fp8 conversion so nn.Linear isinstance checks work)
     optimizer = create_optimizer(model, args)
+
+    # Restore optimizer state
+    if ckpt_data is not None:
+        optimizer.load_state_dict(ckpt_data["optimizer_state_dict"])
+        if ddp_rank == 0:
+            log.info(f"Restored optimizer state from step {ckpt_data['step']}")
 
     # Mixed precision setup (fp8 converts model in-place)
     precision_ctx = setup_precision(args, model, device_type)
@@ -309,30 +378,44 @@ def main():
         peak_flops = float("inf")
     tokens_per_step = args.batch_size * args.context_window * ddp_world_size
 
-    # Step-0 evaluation
-    global_step = 0
-    metrics = evaluate(model, val_loader, args.val_steps, precision_ctx)
-    if args.log_diagnostics:
-        weight_diag = compute_weight_diagnostics(raw_model)
-        metrics.update(weight_diag)
-        for k, v in list(metrics.items()):
-            if k.endswith("/sv_histogram"):
-                metrics[k] = wandb.Histogram(v)
-    wb.log(metrics, step=global_step)
-    if ddp_rank == 0:
-        summary = ", ".join(
-            f"{k}: {v:.4f}" for k, v in metrics.items()
-            if not k.startswith("diagnostics/")
-        )
-        log.info(f"[Step {global_step}] {summary}")
+    # Step-0 evaluation (skip on resume — already evaluated at checkpoint step)
+    if ckpt_data is None:
+        global_step = 0
+        metrics = evaluate(model, val_loader, args.val_steps, precision_ctx)
+        if args.log_diagnostics:
+            weight_diag = compute_weight_diagnostics(raw_model)
+            metrics.update(weight_diag)
+            for k, v in list(metrics.items()):
+                if k.endswith("/sv_histogram"):
+                    metrics[k] = wandb.Histogram(v)
+        wb.log(metrics, step=global_step)
+        if ddp_rank == 0:
+            summary = ", ".join(
+                f"{k}: {v:.4f}" for k, v in metrics.items()
+                if not k.startswith("diagnostics/")
+            )
+            log.info(f"[Step {global_step}] {summary}")
+
+    # Resolve initial LR for resume
+    resume_lr_value = None
+    if ckpt_data is not None and args.resume_lr:
+        lr_state = ckpt_data["meta"].get("lr_state")
+        if lr_state and "current_lr" in lr_state:
+            resume_lr_value = lr_state["current_lr"]
+            if ddp_rank == 0:
+                log.info(f"Using saved LR from checkpoint: {resume_lr_value:.2e}")
 
     # Training loop
     model.train()
     t0 = time.perf_counter()
+    data_state = None
 
-    for step in range(1, args.max_steps + 1):
+    for step in range(start_step, args.max_steps + 1):
         # LR schedule
-        lr = get_lr(step - 1, args.warmup_steps, args.max_steps, args.lr)
+        if resume_lr_value is not None and step == start_step:
+            lr = resume_lr_value
+        else:
+            lr = get_lr(step - 1, args.warmup_steps, args.max_steps, args.lr)
         set_lr(optimizer, lr)
 
         # Forward
@@ -394,6 +477,35 @@ def main():
                     if not k.startswith("diagnostics/")
                 )
                 log.info(f"[Step {step}] {summary}")
+
+        # Checkpoint save
+        last_step = (step == args.max_steps)
+        should_save = args.save_every > 0 and (
+            last_step
+            or (step % args.save_every == 0 and step != start_step)
+        )
+        if should_save:
+            meta_data = {
+                "step": step,
+                "val_loss": metrics.get("eval/loss") if (step % args.eval_every == 0) else None,
+                "args": vars(args),
+                "data_state": data_state,
+                "lr_state": {
+                    "current_lr": lr,
+                    "warmup_steps": args.warmup_steps,
+                    "max_steps": args.max_steps,
+                    "max_lr": args.lr,
+                },
+            }
+            save_checkpoint(
+                args.checkpoint_dir, step,
+                raw_model.state_dict(),
+                optimizer.state_dict(),
+                meta_data,
+                rank=ddp_rank, use_ddp=use_ddp,
+            )
+            if ddp_rank == 0:
+                log.info(f"Saved checkpoint at step {step}")
 
     # Final evaluation
     if args.log_diagnostics:
