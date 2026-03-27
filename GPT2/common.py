@@ -260,8 +260,13 @@ class LocalMetricLogger:
 
         for k, v in data.items():
             if hasattr(v, "histogram"):
-                # wandb.Histogram — extract (bin_edges, counts) numpy arrays
-                edges, counts = v.histogram
+                # wandb.Histogram — newer SDK stores counts in .histogram and
+                # bin edges in .bins; older SDK stored a 2-tuple in .histogram
+                if hasattr(v, "bins"):
+                    counts = v.histogram
+                    edges = v.bins
+                else:
+                    counts, edges = v.histogram
                 record[k] = {
                     "_type": "histogram",
                     "bin_edges": edges.tolist(),
