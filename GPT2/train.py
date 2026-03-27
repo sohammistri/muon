@@ -25,6 +25,7 @@ from GPT2.common import (
     print_banner,
     get_peak_flops,
     DummyWandb,
+    LocalMetricLogger,
 )
 from common.logger import setup_logger
 from common.metrics import compute_weight_diagnostics, compute_gradient_diagnostics
@@ -290,7 +291,7 @@ def main():
     if args.compile:
         model = torch.compile(model)
 
-    # W&B
+    # W&B or local metric logging
     if args.wandb and ddp_rank == 0:
         wandb.init(
             project="muon",
@@ -298,6 +299,12 @@ def main():
             config=vars(args),
         )
         wb = wandb
+    elif ddp_rank == 0:
+        wb = LocalMetricLogger(
+            project="muon",
+            name=f"gpt2-{args.optim}-{args.precision}",
+            config=vars(args),
+        )
     else:
         wb = DummyWandb()
 

@@ -221,6 +221,67 @@ class DummyWandb:
     def finish(self):
         pass
 
+class LocalMetricLogger:
+    """Local file-based metric logger — drop-in replacement for wandb.
+
+    Writes metrics as JSON Lines to a timestamped directory under logs/.
+    Used when W&B login is unavailable (--no-wandb) so no metrics are lost.
+    """
+
+    def __init__(self, project=None, name=None, config=None, log_dir=None):
+        import json
+        from datetime import datetime
+
+        if log_dir is None:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            log_dir = os.path.join(repo_root, "logs")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = name or "run"
+        self._run_dir = os.path.join(log_dir, f"metrics_{run_name}_{timestamp}")
+        os.makedirs(self._run_dir, exist_ok=True)
+
+        if config is not None:
+            config_path = os.path.join(self._run_dir, "config.json")
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2)
+
+        self._metrics_path = os.path.join(self._run_dir, "metrics.jsonl")
+        self._file = open(self._metrics_path, "a")
+        logger.info(f"Local metric logging to: {self._run_dir}")
+
+    def log(self, data, step=None, **kwargs):
+        import json
+        import math
+
+        record = {}
+        if step is not None:
+            record["_step"] = step
+
+        for k, v in data.items():
+            if hasattr(v, "histogram"):
+                # wandb.Histogram — extract (bin_edges, counts) numpy arrays
+                edges, counts = v.histogram
+                record[k] = {
+                    "_type": "histogram",
+                    "bin_edges": edges.tolist(),
+                    "counts": counts.tolist(),
+                }
+            elif isinstance(v, (list, tuple)):
+                record[k] = list(v)
+            elif isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                record[k] = str(v)
+            else:
+                record[k] = v
+
+        self._file.write(json.dumps(record) + "\n")
+        self._file.flush()
+
+    def finish(self):
+        if self._file and not self._file.closed:
+            self._file.close()
+            logger.info(f"Metrics saved to: {self._run_dir}")
+
 # hardcoded BF16 peak flops for various GPUs
 # inspired by torchtitan: https://github.com/pytorch/torchtitan/blob/main/torchtitan/tools/utils.py
 # and PR: https://github.com/karpathy/nanochat/pull/147
