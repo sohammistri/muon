@@ -87,6 +87,30 @@ def load_checkpoint(checkpoint_dir, step, device, rank=0, use_ddp=False):
     }
 
 
+def find_all_steps(checkpoint_dir):
+    """Find all checkpoint steps in a directory, sorted ascending.
+
+    Returns:
+        List of step numbers found, sorted ascending. Empty list if none.
+    """
+    if not os.path.isdir(checkpoint_dir):
+        return []
+
+    pattern = os.path.join(checkpoint_dir, "meta_*.json")
+    meta_files = glob.glob(pattern)
+    if not meta_files:
+        return []
+
+    steps = []
+    for path in meta_files:
+        filename = os.path.basename(path)
+        match = re.match(r"meta_(\d+)\.json$", filename)
+        if match:
+            steps.append(int(match.group(1)))
+
+    return sorted(steps)
+
+
 def find_latest_step(checkpoint_dir):
     """Find the latest checkpoint step in a directory.
 
