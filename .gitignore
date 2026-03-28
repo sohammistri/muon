@@ -6,3 +6,4 @@ __pycache__/
 .venv/
 wandb/
 .DS_Store
+eval_logs/
