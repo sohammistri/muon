@@ -28,12 +28,13 @@ import wandb
 LOGS_DIR = Path(__file__).parent / "logs"
 
 RUN_MAPPING: dict[str, dict] = {
-    "metrics_gpt2-muon-llm-bf16_20260327_081542": {"depth": 12, "optim": "muon-llm", "lr": 3e-4},
-    "metrics_gpt2-muon-llm-bf16_20260327_112457": {"depth": 12, "optim": "muon-llm", "lr": 1e-3},
-    "metrics_gpt2-adamw-bf16_20260327_131643":    {"depth": 12, "optim": "adamw",    "lr": 1e-3},
-    "metrics_gpt2-adamw-bf16_20260327_161413":    {"depth": 12, "optim": "adamw",    "lr": 3e-4},
-    "metrics_gpt2-adamw-bf16_20260327_191652":    {"depth": 24, "optim": "adamw",    "lr": 1e-3},
-    "metrics_gpt2-adamw-bf16_20260327_232526":    {"depth": 24, "optim": "adamw",    "lr": 3e-3},
+    # "metrics_gpt2-muon-llm-bf16_20260327_081542": {"depth": 12, "optim": "muon-llm", "lr": 3e-4},
+    # "metrics_gpt2-muon-llm-bf16_20260327_112457": {"depth": 12, "optim": "muon-llm", "lr": 1e-3},
+    # "metrics_gpt2-adamw-bf16_20260327_131643":    {"depth": 12, "optim": "adamw",    "lr": 1e-3},
+    # "metrics_gpt2-adamw-bf16_20260327_161413":    {"depth": 12, "optim": "adamw",    "lr": 3e-4},
+    # "metrics_gpt2-adamw-bf16_20260327_191652":    {"depth": 24, "optim": "adamw",    "lr": 1e-3},
+    # "metrics_gpt2-adamw-bf16_20260327_232526":    {"depth": 24, "optim": "adamw",    "lr": 3e-3},
+    "metrics_gpt2-muon-llm-bf16_20260328_083504":    {"depth": 24, "optim": "muon-llm",    "lr": 3e-3},
 }
 
 
