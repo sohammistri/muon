@@ -446,7 +446,8 @@ def main():
         # Write per-step CORE CSV
         if core_results and ddp_rank == 0:
             base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval",
+            ckpt_subdir = os.path.basename(checkpoint_dir.rstrip("/"))
+            output_csv_path = os.path.join(base_dir, "base_eval", ckpt_subdir,
                                            f"gpt2_step_{step:06d}.csv")
             os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
             with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
@@ -466,8 +467,9 @@ def main():
     # Write aggregate CSV
     if ddp_rank == 0 and aggregate_results:
         base_dir = get_base_dir()
-        agg_csv_path = os.path.join(base_dir, "base_eval",
-                                    f"gpt2_aggregate_{os.path.basename(checkpoint_dir)}.csv")
+        ckpt_subdir = os.path.basename(checkpoint_dir.rstrip("/"))
+        agg_csv_path = os.path.join(base_dir, "base_eval", ckpt_subdir,
+                                    f"gpt2_aggregate_{ckpt_subdir}.csv")
         os.makedirs(os.path.dirname(agg_csv_path), exist_ok=True)
         # Collect all keys across all steps
         all_keys = []
