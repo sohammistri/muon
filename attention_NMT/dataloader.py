@@ -132,11 +132,10 @@ def nmt_distributed_data_loader_with_state(
             tgt_texts, prepend=bos_id, append=eos_id, num_threads=tokenizer_threads,
         )
         for src_toks, tgt_toks in zip(src_token_lists, tgt_token_lists):
-            # Truncate to max_tok_len, preserving BOS at start and forcing EOS at end
-            if len(src_toks) > max_tok_len:
-                src_toks = src_toks[:max_tok_len - 1] + [eos_id]
-            if len(tgt_toks) > max_tok_len:
-                tgt_toks = tgt_toks[:max_tok_len - 1] + [eos_id]
+            # Filter out pairs that exceed max_tok_len (don't truncate —
+            # truncation destroys translation quality)
+            if len(src_toks) > max_tok_len or len(tgt_toks) > max_tok_len:
+                continue
             sentence_pool.append((src_toks, tgt_toks))
 
     while True:
