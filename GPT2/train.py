@@ -25,6 +25,7 @@ from GPT2.common import (
     print_banner,
     get_peak_flops,
     DummyWandb,
+    LocalMetricLogger,
 )
 from GPT2.checkpoint import save_checkpoint, load_checkpoint, find_latest_step
 from GPT2.dataset import list_parquet_files
@@ -429,13 +430,16 @@ def main():
         model = torch.compile(model)
 
     # W&B
+    run_name = f"gpt2-d{args.depth}-lr_{args.lr}-steps_{args.max_steps}-{args.optim}-{args.precision}"
     if args.wandb and ddp_rank == 0:
         wandb.init(
             project="muon",
-            name=f"gpt2-d{args.depth}-lr_{args.lr}-steps_{args.max_steps}-{args.optim}-{args.precision}",
+            name=run_name,
             config=vars(args),
         )
         wb = wandb
+    elif not args.wandb and ddp_rank == 0:
+        wb = LocalMetricLogger(project="muon", name=run_name, config=vars(args))
     else:
         wb = DummyWandb()
 
