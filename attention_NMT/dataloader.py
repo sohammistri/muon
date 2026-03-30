@@ -82,7 +82,7 @@ def nmt_distributed_data_loader_with_state(
     tokenizer, B, T, segment, split,
     tokenizer_threads=4, tokenizer_batch_size=128,
     device="cuda", resume_state_dict=None,
-    bucket_size=None,
+    bucket_size=None, min_tokens=5,
 ):
     """
     NMT dataloader with dynamic padding and length bucketing.
@@ -114,7 +114,8 @@ def nmt_distributed_data_loader_with_state(
     bos_id = tokenizer.get_bos_token_id()
     eos_id = tokenizer.get_eos_token_id()
     pad_id = tokenizer.get_vocab_size()  # PAD = one past last valid token
-    max_tok_len = T + 2  # T content tokens + BOS + EOS
+    max_tok_len = T  # total tokens incl. BOS/EOS must fit in context_window
+    min_tok_len = min_tokens + 2  # min content tokens + BOS + EOS
 
     batches = _parallel_sentence_batches(segment, split, resume_state_dict, tokenizer_batch_size)
     use_cuda = device == "cuda"
@@ -132,9 +133,9 @@ def nmt_distributed_data_loader_with_state(
             tgt_texts, prepend=bos_id, append=eos_id, num_threads=tokenizer_threads,
         )
         for src_toks, tgt_toks in zip(src_token_lists, tgt_token_lists):
-            # Filter out pairs that exceed max_tok_len (don't truncate —
-            # truncation destroys translation quality)
-            if len(src_toks) > max_tok_len or len(tgt_toks) > max_tok_len:
+            # Filter out pairs that are too long or too short
+            if (len(src_toks) > max_tok_len or len(tgt_toks) > max_tok_len
+                    or len(src_toks) < min_tok_len or len(tgt_toks) < min_tok_len):
                 continue
             sentence_pool.append((src_toks, tgt_toks))
 

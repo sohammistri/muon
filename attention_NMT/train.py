@@ -65,6 +65,9 @@ def parse_args():
                         help="Linear LR warmup steps")
     parser.add_argument("--segment", type=str, default="hi",
                         help="Language pair segment (default: hi for en-hi)")
+    parser.add_argument("--min_tokens", type=int, default=5,
+                        help="Minimum content tokens per sequence (pairs with "
+                             "either side shorter are dropped)")
 
     # Precision
     parser.add_argument("--precision", choices=["fp32", "bf16", "fp8"],
@@ -228,7 +231,7 @@ def set_lr(optimizer, lr):
 
 
 def estimate_epoch_steps(batch_size, context_window, segment, ddp_world_size,
-                         num_sample_rgs=3):
+                         num_sample_rgs=3, min_tokens=5):
     """Estimate training steps per epoch from parquet metadata + filter-rate sampling.
 
     Counts total sentence pairs from metadata (instant), then tokenizes a small
@@ -255,7 +258,8 @@ def estimate_epoch_steps(batch_size, context_window, segment, ddp_world_size,
     tokenizer = get_tokenizer(segment)
     bos_id = tokenizer.get_bos_token_id()
     eos_id = tokenizer.get_eos_token_id()
-    max_tok_len = context_window + 2  # T content tokens + BOS + EOS
+    max_tok_len = context_window  # total tokens incl. BOS/EOS must fit in context_window
+    min_tok_len = min_tokens + 2  # min content tokens + BOS + EOS
 
     sample_total = 0
     sample_filtered = 0
@@ -272,7 +276,8 @@ def estimate_epoch_steps(batch_size, context_window, segment, ddp_world_size,
         )
         for src_toks, tgt_toks in zip(src_token_lists, tgt_token_lists):
             sample_total += 1
-            if len(src_toks) > max_tok_len or len(tgt_toks) > max_tok_len:
+            if (len(src_toks) > max_tok_len or len(tgt_toks) > max_tok_len
+                    or len(src_toks) < min_tok_len or len(tgt_toks) < min_tok_len):
                 sample_filtered += 1
 
     filter_rate = sample_filtered / max(sample_total, 1)
@@ -333,6 +338,7 @@ def main():
     # Estimate epoch steps
     total_pairs, effective_pairs, filter_rate, steps_per_epoch = estimate_epoch_steps(
         args.batch_size, args.context_window, args.segment, ddp_world_size,
+        min_tokens=args.min_tokens,
     )
     epoch_based_max_steps = steps_per_epoch * args.epochs
     if args.max_steps is not None:
@@ -397,6 +403,7 @@ def main():
     train_loader, val_loader, vocab_size, pad_id = get_nmt_loaders(
         B=args.batch_size, T=args.context_window, segment=args.segment,
         device=device, resume_state_dict=data_resume,
+        min_tokens=args.min_tokens,
     )
     if ddp_rank == 0:
         log.info(f"Vocab size: {vocab_size:,} | PAD ID: {pad_id}")
