@@ -478,7 +478,7 @@ def main():
     # Step-0 evaluation (skip on resume)
     if ckpt_data is None:
         global_step = 0
-        metrics = evaluate(model, val_loader, args.val_steps, pad_id, precision_ctx)
+        metrics = evaluate(raw_model, val_loader, args.val_steps, pad_id, precision_ctx)
         if args.log_diagnostics:
             weight_diag = compute_weight_diagnostics(raw_model)
             metrics.update(weight_diag)
@@ -574,7 +574,7 @@ def main():
             if args.log_diagnostics:
                 grad_diag = compute_gradient_diagnostics(raw_model)
                 weight_diag = compute_weight_diagnostics(raw_model)
-            metrics = evaluate(model, val_loader, args.val_steps, pad_id, precision_ctx)
+            metrics = evaluate(raw_model, val_loader, args.val_steps, pad_id, precision_ctx)
             if args.log_diagnostics:
                 metrics.update(grad_diag)
                 metrics.update(weight_diag)
@@ -622,7 +622,7 @@ def main():
     if args.log_diagnostics:
         grad_diag = compute_gradient_diagnostics(raw_model)
         weight_diag = compute_weight_diagnostics(raw_model)
-    metrics = evaluate(model, val_loader, args.val_steps, pad_id, precision_ctx)
+    metrics = evaluate(raw_model, val_loader, args.val_steps, pad_id, precision_ctx)
     if args.log_diagnostics:
         metrics.update(grad_diag)
         metrics.update(weight_diag)

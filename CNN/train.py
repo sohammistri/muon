@@ -129,6 +129,7 @@ def main():
 
     # Create model
     model = CNN(in_channels, num_classes, args.channels, args.dropout).to(device)
+    raw_model = model
     model = torch.compile(model)
     param_count = sum(p.numel() for p in model.parameters())
     log.info(f"Model parameters: {param_count:,}")
@@ -146,9 +147,9 @@ def main():
 
     # Step-0 evaluation
     global_step = 0
-    metrics = evaluate(model, test_loader, criterion, device)
+    metrics = evaluate(raw_model, test_loader, criterion, device)
     if args.log_diagnostics:
-        weight_diag = compute_weight_diagnostics(model)
+        weight_diag = compute_weight_diagnostics(raw_model)
         metrics.update(weight_diag)
         for k, v in list(metrics.items()):
             if k.endswith("/sv_histogram"):
@@ -178,9 +179,9 @@ def main():
 
             if global_step % args.eval_every == 0:
                 if args.log_diagnostics:
-                    grad_diag = compute_gradient_diagnostics(model)
-                    weight_diag = compute_weight_diagnostics(model)
-                metrics = evaluate(model, test_loader, criterion, device)
+                    grad_diag = compute_gradient_diagnostics(raw_model)
+                    weight_diag = compute_weight_diagnostics(raw_model)
+                metrics = evaluate(raw_model, test_loader, criterion, device)
                 if args.log_diagnostics:
                     metrics.update(grad_diag)
                     metrics.update(weight_diag)
@@ -194,9 +195,9 @@ def main():
 
     # Final evaluation
     if args.log_diagnostics:
-        grad_diag = compute_gradient_diagnostics(model)
-        weight_diag = compute_weight_diagnostics(model)
-    metrics = evaluate(model, test_loader, criterion, device)
+        grad_diag = compute_gradient_diagnostics(raw_model)
+        weight_diag = compute_weight_diagnostics(raw_model)
+    metrics = evaluate(raw_model, test_loader, criterion, device)
     if args.log_diagnostics:
         metrics.update(grad_diag)
         metrics.update(weight_diag)
