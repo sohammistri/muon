@@ -30,7 +30,7 @@ import time
 # Constants
 # ---------------------------------------------------------------------------
 LOCAL_LOGS = "/root/code/muon/logs"
-CHECKPOINT_BASE = "/root/code/muon/GPT2"
+CHECKPOINT_BASE = "/root/code/muon/attention_NMT"
 REMOTE_LOGS = "az://m365transfer/data/mistrisoham/personal/muon/nmt_training_logs/"
 REMOTE_CKPT_BASE = "az://m365transfer/data/mistrisoham/personal/muon/nmt_checkpoints/"
 

@@ -39,7 +39,7 @@ for i in "${!RUNS[@]}"; do
         --precision bf16 \
         --eval_every 10000 \
         --save_every 10000 \
-        --checkpoint_dir d6-muon-llm-lr1e-4-epoch3 \
+        --checkpoint_dir "${CKPT_DIR}" \
         --log_diagnostics \
         --no-wandb \
         --no-compile
