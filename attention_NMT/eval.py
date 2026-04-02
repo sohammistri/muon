@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import wandb
 from GPT2.common import (
     compute_init, compute_cleanup, print0,
-    get_base_dir, autodetect_device_type, DummyWandb,
+    get_base_dir, autodetect_device_type, DummyWandb, LocalMetricLogger,
 )
 from GPT2.checkpoint import load_checkpoint, find_all_steps
 from attention_NMT.model import Transformer
@@ -411,19 +411,25 @@ def main():
         precision_ctx = torch.amp.autocast(device_type=device_type, enabled=False)
 
     # Init wandb
+    run_name = f"nmt-eval-{os.path.basename(args.checkpoint_dir)}"
+    eval_config = {
+        "checkpoint_dir": args.checkpoint_dir,
+        "eval_modes": sorted(eval_modes),
+        "batch_size": args.batch_size,
+        "max_decode_len": args.max_decode_len,
+        "precision": args.precision,
+    }
+    eval_log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_logs")
     if args.wandb and ddp_rank == 0:
         wandb.init(
             project="muon",
-            name=f"nmt-eval-{os.path.basename(args.checkpoint_dir)}",
-            config={
-                "checkpoint_dir": args.checkpoint_dir,
-                "eval_modes": sorted(eval_modes),
-                "batch_size": args.batch_size,
-                "max_decode_len": args.max_decode_len,
-                "precision": args.precision,
-            },
+            name=run_name,
+            config=eval_config,
         )
         wb = wandb
+    elif not args.wandb and ddp_rank == 0:
+        wb = LocalMetricLogger(project="muon", name=run_name, config=eval_config,
+                               log_dir=eval_log_dir)
     else:
         wb = DummyWandb()
 
