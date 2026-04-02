@@ -30,7 +30,7 @@ from attention_NMT.dataloader import (
 )
 
 
-def get_nmt_loaders(B, T, segment="hi", device="cuda", resume_state_dict=None):
+def get_nmt_loaders(B, T, segment="hi", device="cuda", resume_state_dict=None, min_tokens=5):
     """
     NMT dataloaders.
 
@@ -57,10 +57,12 @@ def get_nmt_loaders(B, T, segment="hi", device="cuda", resume_state_dict=None):
     train_loader = nmt_distributed_data_loader_with_state(
         tokenizer, B, T, segment, split="train",
         device=device, resume_state_dict=resume_state_dict,
+        min_tokens=min_tokens,
     )
     val_loader = nmt_distributed_data_loader(
         tokenizer, B, T, segment, split="val",
         device=device,
+        min_tokens=min_tokens,
     )
 
     return train_loader, val_loader, vocab_size, pad_id

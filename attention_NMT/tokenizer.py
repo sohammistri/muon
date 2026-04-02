@@ -181,8 +181,25 @@ class RustBPETokenizer:
     @classmethod
     def from_directory(cls, tokenizer_dir):
         pickle_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
-        with open(pickle_path, "rb") as f:
-            enc = pickle.load(f)
+        # Patch tiktoken.Encoding.__init__ to drop unknown kwargs (e.g. 'numeric_special_tokens'
+        # from older tiktoken versions) so old pickles can still be loaded.
+        _orig_init = tiktoken.Encoding.__init__
+        def _compat_init(self_, **kwargs):
+            kwargs.pop('numeric_special_tokens', None)
+            _orig_init(self_, **kwargs)
+        tiktoken.Encoding.__init__ = _compat_init
+        try:
+            with open(pickle_path, "rb") as f:
+                data = pickle.load(f)
+        finally:
+            tiktoken.Encoding.__init__ = _orig_init
+        if isinstance(data, dict):
+            # New format: raw state dict saved by updated save()
+            data.pop('numeric_special_tokens', None)
+            enc = tiktoken.Encoding(**data)
+        else:
+            # Old format: tiktoken.Encoding object loaded via compat patch
+            enc = data
         return cls(enc, "<|bos|>")
 
     @classmethod
@@ -248,11 +265,22 @@ class RustBPETokenizer:
         return self.enc.decode(ids)
 
     def save(self, tokenizer_dir):
-        # save the encoding object to disk
+        # Save as a raw state dict instead of the tiktoken.Encoding object directly,
+        # so the pickle is not tied to a specific tiktoken version.
         os.makedirs(tokenizer_dir, exist_ok=True)
         pickle_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
+        state = self.enc.__getstate__()
+        if isinstance(state, str):
+            # Registered encoding: __getstate__ returns just the name; expand to full state
+            state = {
+                "name": self.enc.name,
+                "pat_str": self.enc._pat_str,
+                "mergeable_ranks": self.enc._mergeable_ranks,
+                "special_tokens": self.enc._special_tokens,
+            }
+        state.pop('numeric_special_tokens', None)
         with open(pickle_path, "wb") as f:
-            pickle.dump(self.enc, f)
+            pickle.dump(state, f)
         print(f"Saved tokenizer encoding to {pickle_path}")
 
 # -----------------------------------------------------------------------------

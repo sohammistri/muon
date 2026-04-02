@@ -39,7 +39,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import wandb
-from GPT2.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock, DummyWandb
+from GPT2.common import compute_init, compute_cleanup, print0, get_base_dir, autodetect_device_type, download_file_with_lock, DummyWandb, LocalMetricLogger
 from GPT2.tokenizer import HuggingFaceTokenizer, get_token_bytes, get_tokenizer
 from GPT2.checkpoint import load_checkpoint, find_all_steps
 from GPT2.core_eval import evaluate_task
@@ -377,20 +377,27 @@ def main():
     tokenizer = get_tokenizer()
     token_bytes = get_token_bytes(device=device)
 
-    # Init wandb
+    # Init wandb (or local file logger when W&B is unavailable)
+    eval_config = {
+        "checkpoint_dir": checkpoint_dir,
+        "eval_modes": sorted(eval_modes),
+        "max_per_task": args.max_per_task,
+        "device_batch_size": args.device_batch_size,
+        "split_tokens": args.split_tokens,
+    }
     if args.wandb and ddp_rank == 0:
         wandb.init(
             project="muon",
             name=f"gpt2-eval-{os.path.basename(checkpoint_dir)}",
-            config={
-                "checkpoint_dir": checkpoint_dir,
-                "eval_modes": sorted(eval_modes),
-                "max_per_task": args.max_per_task,
-                "device_batch_size": args.device_batch_size,
-                "split_tokens": args.split_tokens,
-            },
+            config=eval_config,
         )
         wb = wandb
+    elif ddp_rank == 0:
+        wb = LocalMetricLogger(
+            project="muon",
+            name=f"gpt2-eval-{os.path.basename(checkpoint_dir)}",
+            config=eval_config,
+        )
     else:
         wb = DummyWandb()
 
@@ -439,7 +446,8 @@ def main():
         # Write per-step CORE CSV
         if core_results and ddp_rank == 0:
             base_dir = get_base_dir()
-            output_csv_path = os.path.join(base_dir, "base_eval",
+            ckpt_subdir = os.path.basename(checkpoint_dir.rstrip("/"))
+            output_csv_path = os.path.join(base_dir, "base_eval", ckpt_subdir,
                                            f"gpt2_step_{step:06d}.csv")
             os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
             with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
@@ -459,8 +467,9 @@ def main():
     # Write aggregate CSV
     if ddp_rank == 0 and aggregate_results:
         base_dir = get_base_dir()
-        agg_csv_path = os.path.join(base_dir, "base_eval",
-                                    f"gpt2_aggregate_{os.path.basename(checkpoint_dir)}.csv")
+        ckpt_subdir = os.path.basename(checkpoint_dir.rstrip("/"))
+        agg_csv_path = os.path.join(base_dir, "base_eval", ckpt_subdir,
+                                    f"gpt2_aggregate_{ckpt_subdir}.csv")
         os.makedirs(os.path.dirname(agg_csv_path), exist_ok=True)
         # Collect all keys across all steps
         all_keys = []
