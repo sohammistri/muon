@@ -25,11 +25,15 @@ import wandb
 # Run mapping: folder-name-suffix → hyperparams
 # NOTE: d24-muon-llm run (20260328_033305) is still in progress — excluded.
 # ---------------------------------------------------------------------------
-LOGS_DIR = Path(__file__).parent / "logs"
+LOGS_DIR = Path(__file__).parent / "eval_logs"
 
 RUN_MAPPING: dict[str, dict] = {
-    "metrics_nmt-d6-lr_0.001-ep_3-muon-jordan-bf16_20260401_214412": {"depth": 6, "optim": "muon-jordan", "lr": 1e-3},
-    "metrics_nmt-d6-lr_0.003-ep_3-muon-jordan-bf16_20260402_045449": {"depth": 6, "optim": "muon-jordan", "lr": 3e-3},
+    "metrics_nmt-eval-d6-adamw-lr1e-4-epoch3_20260402_132823": {"depth": 6, "optim": "adamw", "lr": 1e-4},
+    "metrics_nmt-eval-d6-adamw-lr3e-4-epoch3_20260402_134336": {"depth": 6, "optim": "adamw", "lr": 3e-4},
+    "metrics_nmt-eval-d6-adamw-lr1e-3-epoch3_20260402_135819": {"depth": 6, "optim": "adamw", "lr": 1e-3},
+    "metrics_nmt-eval-d6-adamw-lr3e-3-epoch3_20260402_141315": {"depth": 6, "optim": "adamw", "lr": 3e-3},
+    "metrics_nmt-eval-d6-muon-llm-lr1e-4-epoch3_20260402_144156": {"depth": 6, "optim": "muon-llm", "lr": 1e-4},
+    "metrics_nmt-eval-d6-muon-llm-lr3e-4-epoch3_20260402_145637": {"depth": 6, "optim": "muon-llm", "lr": 3e-4},
     # "metrics_nmt-d6-lr_0.003-ep_3-muon-llm-bf16_20260401_002731":    {"depth": 6, "optim": "muon-llm",    "lr": 3e-3},
     # "metrics_nmt-d6-lr_0.003-ep_3-adamw-bf16_20260331_001940":    {"depth": 12, "optim": "adamw",    "lr": 3e-3},
     # "metrics_gpt2-adamw-bf16_20260327_191652":    {"depth": 24, "optim": "adamw",    "lr": 1e-3},
@@ -93,7 +97,7 @@ def upload_run(folder_name: str, meta: dict) -> None:
     print(f"\n→ Uploading {run_name}  ({folder_name})")
 
     run = wandb.init(
-        project="muon",
+        project="muon-eval",
         name=run_name,
         config=config,
         group=group,
