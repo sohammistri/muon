@@ -28,12 +28,12 @@ import wandb
 LOGS_DIR = Path(__file__).parent / "eval_logs"
 
 RUN_MAPPING: dict[str, dict] = {
-    "metrics_nmt-eval-d6-adamw-lr1e-4-epoch3_20260402_132823": {"depth": 6, "optim": "adamw", "lr": 1e-4},
-    "metrics_nmt-eval-d6-adamw-lr3e-4-epoch3_20260402_134336": {"depth": 6, "optim": "adamw", "lr": 3e-4},
-    "metrics_nmt-eval-d6-adamw-lr1e-3-epoch3_20260402_135819": {"depth": 6, "optim": "adamw", "lr": 1e-3},
-    "metrics_nmt-eval-d6-adamw-lr3e-3-epoch3_20260402_141315": {"depth": 6, "optim": "adamw", "lr": 3e-3},
-    "metrics_nmt-eval-d6-muon-llm-lr1e-4-epoch3_20260402_144156": {"depth": 6, "optim": "muon-llm", "lr": 1e-4},
-    "metrics_nmt-eval-d6-muon-llm-lr3e-4-epoch3_20260402_145637": {"depth": 6, "optim": "muon-llm", "lr": 3e-4},
+    "metrics_nmt-eval-d6-muon-jordan-lr1e-4-epoch3_20260402_154022": {"depth": 6, "optim": "muon-jordan", "lr": 1e-4},
+    "metrics_nmt-eval-d6-muon-jordan-lr3e-4-epoch3_20260402_155613": {"depth": 6, "optim": "muon-jordan", "lr": 3e-4},
+    "metrics_nmt-eval-d6-muon-jordan-lr1e-3-epoch3_20260402_160945": {"depth": 6, "optim": "muon-jordan", "lr": 1e-3},
+    "metrics_nmt-eval-d6-muon-jordan-lr3e-3-epoch3_20260402_162350": {"depth": 6, "optim": "muon-jordan", "lr": 3e-3},
+    "metrics_nmt-eval-d6-muon-llm-lr1e-3-epoch3_20260402_151100": {"depth": 6, "optim": "muon-llm", "lr": 1e-3},
+    "metrics_nmt-eval-d6-muon-llm-lr3e-3-epoch3_20260402_152548": {"depth": 6, "optim": "muon-llm", "lr": 3e-3},
     # "metrics_nmt-d6-lr_0.003-ep_3-muon-llm-bf16_20260401_002731":    {"depth": 6, "optim": "muon-llm",    "lr": 3e-3},
     # "metrics_nmt-d6-lr_0.003-ep_3-adamw-bf16_20260331_001940":    {"depth": 12, "optim": "adamw",    "lr": 3e-3},
     # "metrics_gpt2-adamw-bf16_20260327_191652":    {"depth": 24, "optim": "adamw",    "lr": 1e-3},
