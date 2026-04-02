@@ -26,6 +26,7 @@ from attention_NMT.train import (
     set_lr,
     setup_precision,
 )
+from attention_NMT.eval import greedy_decode, compute_translation_metrics
 from muon import MuonJordan, MuonLLM
 from common.metrics import compute_weight_diagnostics, compute_gradient_diagnostics
 
@@ -69,7 +70,6 @@ def _make_model(**overrides):
 
 def _make_batch(B=BATCH_SIZE, T_src=16, T_tgt=12):
     """Create a fake NMT batch: src_ids, tgt_input, tgt_label, src_pad_mask, tgt_pad_mask."""
-    num_embeddings = VOCAB_SIZE + 1  # model uses vocab_size + 1 when pad_id is set
     src_ids = torch.randint(0, VOCAB_SIZE, (B, T_src))
     tgt_input = torch.randint(0, VOCAB_SIZE, (B, T_tgt))
     tgt_label = torch.randint(0, VOCAB_SIZE, (B, T_tgt))
@@ -167,6 +167,19 @@ class TestTransformerModel:
         count_large = sum(p.numel() for p in model_large.parameters())
         assert count_large > count_small
 
+    def test_forward_with_padding(self):
+        """Verify model handles padded inputs with proper masks."""
+        model = _make_model()
+        B, T_src, T_tgt = 2, 16, 12
+        src = torch.randint(0, VOCAB_SIZE, (B, T_src))
+        tgt = torch.randint(0, VOCAB_SIZE, (B, T_tgt))
+        src[:, -4:] = PAD_ID
+        tgt[:, -3:] = PAD_ID
+        src_mask = (src != PAD_ID)
+        tgt_mask = (tgt != PAD_ID)
+        logits = model(src, tgt, src_mask, tgt_mask)
+        assert logits.shape == (B, T_tgt, VOCAB_SIZE + 1)
+
 
 # ---------------------------------------------------------------------------
 # [HIGH] MultiHeadAttention tests
@@ -187,19 +200,17 @@ class TestMultiHeadAttention:
         assert out.shape == (BATCH_SIZE, 10, EMB_DIM)
 
     def test_causal_masking(self):
-        """With is_causal=True, future positions should not influence earlier ones."""
+        """With is_causal=True, changing a future token should not affect earlier outputs."""
         mha = MultiHeadAttention(EMB_DIM, NUM_HEADS, dropout=0.0)
         mha.eval()
         x = torch.randn(1, 8, EMB_DIM)
         out_full = mha(x, x, is_causal=True)
 
-        # Changing a future token should not change earlier outputs
         x2 = x.clone()
-        x2[0, 7, :] = torch.randn(EMB_DIM)  # change last position
+        x2[0, 7, :] = torch.randn(EMB_DIM)
         out_modified = mha(x2, x2, is_causal=True)
 
-        # Positions 0-6 should be identical
-        assert torch.allclose(out_full[0, :7], out_modified[0, :7], atol=1e-5)
+        torch.testing.assert_close(out_full[0, :7], out_modified[0, :7], atol=1e-5, rtol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +223,6 @@ class TestBlocks:
         x = torch.randn(BATCH_SIZE, 16, EMB_DIM)
         out = block(x)
         assert out.shape == x.shape
-        # Output should differ from input (non-trivial transformation)
         assert not torch.allclose(out, x)
 
     def test_decoder_block_residual(self):
@@ -246,7 +256,6 @@ class TestSinusoidalPE:
 
     def test_is_buffer_not_parameter(self):
         model = _make_model()
-        # pos_emb should be a buffer, not a learned parameter
         param_names = {n for n, _ in model.named_parameters()}
         assert not any("pos_emb" in n for n in param_names)
         buffer_names = {n for n, _ in model.named_buffers()}
@@ -309,7 +318,6 @@ class TestOptimizerCreation:
         model = _make_model()
         opt = create_optimizer(model, _Args("muon-jordan"))
 
-        # First optimizer is Muon
         muon_opt = opt.optimizers[0]
         assert isinstance(muon_opt, MuonJordan)
 
@@ -321,7 +329,6 @@ class TestOptimizerCreation:
         modules = dict(model.named_modules())
         for name, p in model.named_parameters():
             if id(p) in muon_param_ids:
-                # Must be a backbone Linear weight
                 assert "backbone" in name, f"Muon got non-backbone param: {name}"
                 assert name.endswith(".weight"), f"Muon got non-weight param: {name}"
                 assert p.ndim == 2, f"Muon got non-2D param: {name} (ndim={p.ndim})"
@@ -342,11 +349,8 @@ class TestOptimizerCreation:
             for p in pg["params"]:
                 adam_param_ids.add(id(p))
 
-        # Embedding weights should be in AdamW
         assert id(model.backbone.token_emb.weight) in adam_param_ids
-        # Head weight should be in AdamW
         assert id(model.head.weight) in adam_param_ids
-        # LayerNorm params should be in AdamW
         for name, p in model.named_parameters():
             if "ln" in name:
                 assert id(p) in adam_param_ids, f"LayerNorm param {name} not in AdamW"
@@ -363,7 +367,6 @@ class TestOptimizerGroup:
         sd = opt.state_dict()
         assert isinstance(sd, list)
         assert len(sd) == len(opt.optimizers)
-        # Should not raise
         opt.load_state_dict(sd)
 
     def test_param_groups_aggregation(self):
@@ -611,6 +614,96 @@ class TestEvaluate:
 
 
 # ---------------------------------------------------------------------------
+# [CRITICAL] Greedy decoding tests
+# ---------------------------------------------------------------------------
+
+class TestGreedyDecode:
+    def test_returns_list_of_lists(self):
+        model = _make_model()
+        model.eval()
+        B = 2
+        src_ids = torch.randint(0, VOCAB_SIZE, (B, 10))
+        src_pad_mask = torch.ones(B, 10, dtype=torch.bool)
+        precision_ctx = contextlib.nullcontext()
+
+        results = greedy_decode(
+            model, src_ids, src_pad_mask,
+            bos_id=0, eos_id=1, pad_id=PAD_ID,
+            max_len=20, precision_ctx=precision_ctx,
+        )
+
+        assert isinstance(results, list)
+        assert len(results) == B
+        for seq in results:
+            assert isinstance(seq, list)
+
+    def test_respects_max_len(self):
+        model = _make_model()
+        model.eval()
+        src_ids = torch.randint(0, VOCAB_SIZE, (1, 8))
+        src_pad_mask = torch.ones(1, 8, dtype=torch.bool)
+        precision_ctx = contextlib.nullcontext()
+
+        results = greedy_decode(
+            model, src_ids, src_pad_mask,
+            bos_id=0, eos_id=1, pad_id=PAD_ID,
+            max_len=5, precision_ctx=precision_ctx,
+        )
+
+        for seq in results:
+            assert len(seq) <= 5
+
+    def test_output_excludes_eos(self):
+        """EOS token should not appear in returned sequences."""
+        model = _make_model()
+        model.eval()
+        src_ids = torch.randint(2, VOCAB_SIZE, (2, 8))
+        src_pad_mask = torch.ones(2, 8, dtype=torch.bool)
+        precision_ctx = contextlib.nullcontext()
+        eos_id = 1
+
+        results = greedy_decode(
+            model, src_ids, src_pad_mask,
+            bos_id=0, eos_id=eos_id, pad_id=PAD_ID,
+            max_len=15, precision_ctx=precision_ctx,
+        )
+
+        for seq in results:
+            assert eos_id not in seq
+
+
+# ---------------------------------------------------------------------------
+# [HIGH] Translation metrics tests
+# ---------------------------------------------------------------------------
+
+class TestTranslationMetrics:
+    def test_returns_bleu_and_chrf(self):
+        hyps = ["hello world", "this is a test"]
+        refs = ["hello world", "this is a test"]
+        metrics = compute_translation_metrics(hyps, refs)
+        assert "bleu" in metrics
+        assert "chrf" in metrics
+
+    def test_perfect_translation_high_bleu(self):
+        hyps = ["the cat sat on the mat"]
+        refs = ["the cat sat on the mat"]
+        metrics = compute_translation_metrics(hyps, refs)
+        assert metrics["bleu"] > 50
+
+    def test_bad_translation_low_bleu(self):
+        hyps = ["xyz abc def ghi"]
+        refs = ["the cat sat on the mat"]
+        metrics = compute_translation_metrics(hyps, refs)
+        assert metrics["bleu"] < 10
+
+    def test_no_comet_by_default(self):
+        hyps = ["hello"]
+        refs = ["hello"]
+        metrics = compute_translation_metrics(hyps, refs)
+        assert "comet" not in metrics
+
+
+# ---------------------------------------------------------------------------
 # [HIGH] Weight and gradient diagnostics
 # ---------------------------------------------------------------------------
 
@@ -648,27 +741,21 @@ class TestDiagnostics:
     def test_diagnostics_covers_head_layer(self):
         model = _make_model()
         diag = compute_weight_diagnostics(model)
-        assert any("head" in k for k in diag.keys()), \
-            "Weight diagnostics should include the head Linear layer"
+        assert any("head" in k for k in diag.keys())
 
     def test_diagnostics_covers_attention_projections(self):
         model = _make_model()
         diag = compute_weight_diagnostics(model)
-        assert any("q_proj" in k for k in diag.keys()), \
-            "Weight diagnostics should include q_proj"
-        assert any("k_proj" in k for k in diag.keys()), \
-            "Weight diagnostics should include k_proj"
-        assert any("v_proj" in k for k in diag.keys()), \
-            "Weight diagnostics should include v_proj"
-        assert any("out_proj" in k for k in diag.keys()), \
-            "Weight diagnostics should include out_proj"
+        assert any("q_proj" in k for k in diag.keys())
+        assert any("k_proj" in k for k in diag.keys())
+        assert any("v_proj" in k for k in diag.keys())
+        assert any("out_proj" in k for k in diag.keys())
 
     def test_diagnostics_covers_cross_attention(self):
-        """NMT model has cross-attention in decoder — diagnostics should include it."""
+        """NMT model has cross-attention in decoder -- diagnostics should include it."""
         model = _make_model()
         diag = compute_weight_diagnostics(model)
-        assert any("cross_attn" in k for k in diag.keys()), \
-            "Weight diagnostics should include cross-attention layers"
+        assert any("cross_attn" in k for k in diag.keys())
 
     def test_diagnostics_values_finite(self):
         model = _make_model()
