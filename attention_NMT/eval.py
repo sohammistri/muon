@@ -1,9 +1,10 @@
 """
 Unified evaluation script for NMT checkpoints.
 
-Evaluates translation quality on two datasets:
+Evaluates translation quality on up to three datasets:
   - samanantar val split (teacher-forcing loss + generation metrics)
   - FLORES+ devtest (generation metrics only)
+  - IITB en-hi test (generation metrics only)
 
 Metrics: BLEU, chrF++, and optionally COMET.
 
@@ -15,8 +16,11 @@ Examples:
     # Evaluate a specific step on FLORES+ only
     python -m attention_NMT.eval --checkpoint-dir attention_NMT/checkpoints --step 5000 --eval flores
 
+    # Evaluate on IITB test set only
+    python -m attention_NMT.eval --checkpoint-dir attention_NMT/checkpoints --step 5000 --eval iitb
+
     # Full evaluation with COMET (requires unbabel-comet installed separately)
-    python -m attention_NMT.eval --checkpoint-dir attention_NMT/checkpoints --eval val,flores
+    python -m attention_NMT.eval --checkpoint-dir attention_NMT/checkpoints --eval val,flores,iitb
 """
 
 import os
@@ -42,6 +46,7 @@ from attention_NMT.model import Transformer
 from attention_NMT.tokenizer import get_tokenizer
 from attention_NMT.data import get_nmt_loaders
 from attention_NMT.eval_dataset import load_flores_eval
+from attention_NMT.eval_dataset_iitb import load_iitb_eval
 
 
 # -----------------------------------------------------------------------------
@@ -342,6 +347,64 @@ def evaluate_flores(model, tokenizer, bos_id, eos_id, pad_id, max_len,
 
 
 # -----------------------------------------------------------------------------
+# IITB evaluation
+
+@torch.no_grad()
+def evaluate_iitb(model, tokenizer, bos_id, eos_id, pad_id, max_len,
+                  batch_size, precision_ctx, device, comet_model=None):
+    """
+    Evaluate on IITB en-hi test pairs.
+
+    Returns:
+        dict with "bleu", "chrf", and optionally "comet"
+    """
+    pairs = load_iitb_eval()
+    src_texts = [p["src"] for p in pairs]
+    ref_texts = [p["tgt"] for p in pairs]
+
+    # Tokenize all sources
+    src_encoded = tokenizer.encode(
+        src_texts,
+        prepend="<|bos|>",
+        append="<|eos|>",
+    )
+
+    all_hypotheses = []
+    num_batches = (len(src_encoded) + batch_size - 1) // batch_size
+
+    for batch_idx in range(num_batches):
+        start = batch_idx * batch_size
+        end = min(start + batch_size, len(src_encoded))
+        batch_tokens = src_encoded[start:end]
+
+        # Pad to batch max length
+        max_src_len = max(len(s) for s in batch_tokens)
+        padded = [s + [pad_id] * (max_src_len - len(s)) for s in batch_tokens]
+
+        src_ids = torch.tensor(padded, dtype=torch.long, device=device)
+        src_pad_mask = (src_ids != pad_id)
+
+        decoded_ids = greedy_decode(
+            model, src_ids, src_pad_mask,
+            bos_id, eos_id, pad_id, max_len, precision_ctx,
+        )
+        hyps = [tokenizer.decode(ids) for ids in decoded_ids]
+        all_hypotheses.extend(hyps)
+
+    # Print samples
+    print0("\n--- IITB Test Samples ---")
+    for i in range(min(3, len(src_texts))):
+        print0(f"  SRC: {src_texts[i][:120]}...")
+        print0(f"  REF: {ref_texts[i][:120]}...")
+        print0(f"  HYP: {all_hypotheses[i][:120]}...")
+        print0()
+
+    return compute_translation_metrics(
+        all_hypotheses, ref_texts, src_texts, comet_model,
+    )
+
+
+# -----------------------------------------------------------------------------
 # Main
 
 def main():
@@ -351,7 +414,7 @@ def main():
     parser.add_argument('--step', type=int, default=None,
                         help='Evaluate specific step (default: all)')
     parser.add_argument('--eval', type=str, default='val,flores',
-                        help='Comma-separated: val,flores (default: val,flores)')
+                        help='Comma-separated: val,flores,iitb (default: val,flores)')
     parser.add_argument('--batch-size', type=int, default=32,
                         help='Batch size for generation (default: 32)')
     parser.add_argument('--val-steps', type=int, default=20,
@@ -374,7 +437,7 @@ def main():
 
     # Parse eval modes
     eval_modes = set(mode.strip() for mode in args.eval.split(','))
-    valid_modes = {'val', 'flores'}
+    valid_modes = {'val', 'flores', 'iitb'}
     invalid = eval_modes - valid_modes
     if invalid:
         parser.error(f"Invalid eval modes: {invalid}. Valid: {valid_modes}")
@@ -535,6 +598,32 @@ def main():
                 step_results["flores_comet"] = flores_results["comet"]
                 log_dict["eval/flores_comet"] = flores_results["comet"]
 
+        # --- IITB evaluation ---
+        if 'iitb' in eval_modes:
+            print0("\n" + "=" * 60)
+            print0("IITB Test Evaluation")
+            print0("=" * 60)
+
+            t0 = time.time()
+            iitb_results = evaluate_iitb(
+                model, tokenizer, bos_id, eos_id, pad_id,
+                args.max_decode_len, args.batch_size, precision_ctx,
+                device, comet_model,
+            )
+            elapsed = time.time() - t0
+            print0(f"  BLEU: {iitb_results['bleu']:.2f}  "
+                   f"chrF++: {iitb_results['chrf']:.2f}  "
+                   f"COMET: {iitb_results.get('comet', 'N/A')}  "
+                   f"({elapsed:.1f}s)")
+
+            step_results["iitb_bleu"] = iitb_results["bleu"]
+            step_results["iitb_chrf"] = iitb_results["chrf"]
+            log_dict["eval/iitb_bleu"] = iitb_results["bleu"]
+            log_dict["eval/iitb_chrf"] = iitb_results["chrf"]
+            if "comet" in iitb_results:
+                step_results["iitb_comet"] = iitb_results["comet"]
+                log_dict["eval/iitb_comet"] = iitb_results["comet"]
+
         # Log to wandb
         if log_dict:
             wb.log(log_dict, step=step)
@@ -550,16 +639,16 @@ def main():
             csv_path = os.path.join(eval_dir, f"nmt_step_{step:06d}.csv")
             with open(csv_path, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["metric", "samanantar_val", "flores_devtest"])
+                writer.writerow(["metric", "samanantar_val", "flores_devtest", "iitb_test"])
 
                 def _val(key):
                     return f"{step_results[key]:.4f}" if key in step_results else ""
 
-                writer.writerow(["loss", _val("val_loss"), ""])
-                writer.writerow(["perplexity", _val("val_ppl"), ""])
-                writer.writerow(["bleu", _val("val_bleu"), _val("flores_bleu")])
-                writer.writerow(["chrf", _val("val_chrf"), _val("flores_chrf")])
-                writer.writerow(["comet", _val("val_comet"), _val("flores_comet")])
+                writer.writerow(["loss", _val("val_loss"), "", ""])
+                writer.writerow(["perplexity", _val("val_ppl"), "", ""])
+                writer.writerow(["bleu", _val("val_bleu"), _val("flores_bleu"), _val("iitb_bleu")])
+                writer.writerow(["chrf", _val("val_chrf"), _val("flores_chrf"), _val("iitb_chrf")])
+                writer.writerow(["comet", _val("val_comet"), _val("flores_comet"), _val("iitb_comet")])
 
             print0(f"Results written to: {csv_path}")
 
